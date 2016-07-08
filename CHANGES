@@ -1,0 +1,18 @@
+CHANGES
+=======
+
+* Save 1.0 (11/17/10)
+    - First public release
+
+* Save 1.1 (10/23/14)
+    - Fixed handling of files that do not exist when sync'd
+    - Fixed directory handling, which was including directory prefixes
+    - Fixed regex that checks if address already exists
+    - Added optional ssh heartbeat capability
+    - Added email logging
+    - Added custom logging via external command
+    - Added IPv6 failover support
+    - Added prerequisite Mail::Sendmail
+    - Added prerequisite ndsend (IPv6 only)
+    - Changed syslog config element to be under new log element 
+    - Changed prerequisite Perl to version 5.7.3

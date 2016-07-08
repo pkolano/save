@@ -1,0 +1,124 @@
+#!/usr/bin/perl -T
+#
+# Copyright (C) 2010 United States Government as represented by the
+# Administrator of the National Aeronautics and Space Administration
+# (NASA).  All Rights Reserved.
+#
+# This software is distributed under the NASA Open Source Agreement
+# (NOSA), version 1.3.  The NOSA has been approved by the Open Source
+# Initiative.  See http://www.opensource.org/licenses/nasa1.3.php
+# for the complete NOSA document.
+#
+# THE SUBJECT SOFTWARE IS PROVIDED "AS IS" WITHOUT ANY WARRANTY OF ANY
+# KIND, EITHER EXPRESSED, IMPLIED, OR STATUTORY, INCLUDING, BUT NOT
+# LIMITED TO, ANY WARRANTY THAT THE SUBJECT SOFTWARE WILL CONFORM TO
+# SPECIFICATIONS, ANY IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+# A PARTICULAR PURPOSE, OR FREEDOM FROM INFRINGEMENT, ANY WARRANTY THAT
+# THE SUBJECT SOFTWARE WILL BE ERROR FREE, OR ANY WARRANTY THAT
+# DOCUMENTATION, IF PROVIDED, WILL CONFORM TO THE SUBJECT SOFTWARE. THIS
+# AGREEMENT DOES NOT, IN ANY MANNER, CONSTITUTE AN ENDORSEMENT BY
+# GOVERNMENT AGENCY OR ANY PRIOR RECIPIENT OF ANY RESULTS, RESULTING
+# DESIGNS, HARDWARE, SOFTWARE PRODUCTS OR ANY OTHER APPLICATIONS RESULTING
+# FROM USE OF THE SUBJECT SOFTWARE.  FURTHER, GOVERNMENT AGENCY DISCLAIMS
+# ALL WARRANTIES AND LIABILITIES REGARDING THIRD-PARTY SOFTWARE, IF
+# PRESENT IN THE ORIGINAL SOFTWARE, AND DISTRIBUTES IT "AS IS".
+#
+# RECIPIENT AGREES TO WAIVE ANY AND ALL CLAIMS AGAINST THE UNITED STATES
+# GOVERNMENT, ITS CONTRACTORS AND SUBCONTRACTORS, AS WELL AS ANY PRIOR
+# RECIPIENT.  IF RECIPIENT'S USE OF THE SUBJECT SOFTWARE RESULTS IN ANY
+# LIABILITIES, DEMANDS, DAMAGES, EXPENSES OR LOSSES ARISING FROM SUCH USE,
+# INCLUDING ANY DAMAGES FROM PRODUCTS BASED ON, OR RESULTING FROM,
+# RECIPIENT'S USE OF THE SUBJECT SOFTWARE, RECIPIENT SHALL INDEMNIFY AND
+# HOLD HARMLESS THE UNITED STATES GOVERNMENT, ITS CONTRACTORS AND
+# SUBCONTRACTORS, AS WELL AS ANY PRIOR RECIPIENT, TO THE EXTENT PERMITTED
+# BY LAW.  RECIPIENT'S SOLE REMEDY FOR ANY SUCH MATTER SHALL BE THE
+# IMMEDIATE, UNILATERAL TERMINATION OF THIS AGREEMENT.
+#
+
+use strict;
+use Digest::HMAC_MD5 qw(hmac_md5_hex);
+use Mon::Client;
+use XML::Simple;
+
+our $VERSION = 0.18;
+
+my $saverc = "/etc/saverc";
+
+# exit with 0 for all purposes except monitoring the heartbeat when passive
+exit 0 if (! -r $saverc);
+# parse saverc file
+my $config0 = XMLin($saverc,
+    ForceArray => [qw(file host)],
+    KeyAttr => [],
+    NormalizeSpace => 2,
+) or exit 0;
+my $config = $config0->{heartbeat};
+
+# untaint host arguments
+foreach (@ARGV) {
+    $_ = /^([\w.-]+)$/ ? $1 : exit 0;
+}
+
+# untaint path
+$ENV{PATH} = "/bin:/usr/bin:/usr/local/bin";
+
+# exit immediately if down
+exit 0 if (-f $config->{statedir} . "/save.down");
+
+my $addr = $config->{address};
+$addr = $config->{address6} if (!$addr);
+my $state_file = $config->{statedir} . "/save." . $addr;
+exit 0 if (! -l $state_file);
+my $state = readlink $state_file;
+
+if ($state =~ /passive/) {
+    if (defined $config->{timeout}) {
+        my $trap_file = $config->{statedir} . "/trap." . $addr;
+        my $last_trap = -l $trap_file ? readlink $trap_file : 0;
+        exit 1 if (time - $last_trap > $config->{timeout});
+    }
+    exit 0;
+}
+
+my $summary = $state;
+my $detail = $addr;
+my $time = time;
+
+open(KEY, $config->{key}) or exit 0;
+my $key = <KEY>;
+close KEY;
+chomp $key;
+my $digest = hmac_md5_hex("$summary $detail $time", pack("H*", $key));
+
+if ($config->{type} eq 'ssh') {
+    my @ssh = ("ssh", "-aqx", "-oBatchMode=yes");
+    if (defined $config->{ssh_timeout}) {
+        push(@ssh, "-oConnectTimeout=$config->{ssh_timeout}");
+    }
+    my $user = getpwuid($<);
+    if ($config0->{keys}->{$user}) {
+        push(@ssh, "-i", $config0->{keys}->{$user});
+    }
+    my @alert = ("save.alert", "-g", $config->{group}, "-s", "save", "-T");
+    foreach my $host (@ARGV) {
+        if (open(HOST, '|-', @ssh, $host, @alert)) {
+            # need an extra newline after summary to match trap format
+            print HOST "$summary\n\n$detail\n$time\n$digest";
+            close HOST;
+        }
+    }
+} else {
+    my $mon = Mon::Client->new;
+    foreach my $host (@ARGV) {
+        $mon->host($host);
+        $mon->send_trap(
+            group => $config->{group},
+            service => 'save',
+            retval => 1,
+            opstatus => 'fail',
+            summary => $summary,
+            detail => "$detail\n$time\n$digest",
+        );
+    }
+}
+

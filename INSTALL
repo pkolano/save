@@ -1,0 +1,212 @@
+Save Installation and Configuration
+===================================
+
+1. Prerequisites
+
+    o Mon >= 1.2
+
+    o Iproute2 (ip command)
+
+    o ndsend utility
+        o only needed for IPv6 failover support
+        o found in vzctl-core package of OpenVZ project (openvz.org)
+
+    o Perl >= 5.7.3 and non-standard modules:
+        o Digest::HMAC_MD5
+        o Mail::Sendmail
+        o Mon::Client
+        o Net::ARP
+        o Net::Arping
+        o XML::Simple
+
+
+2. Installation
+
+    First install Mon and Iproute2 per their documentation.  Next,
+    copy the Save executable to a directory used for storing
+    executables.  For example:
+
+        cp perl/save /usr/local/bin
+
+    would install the executable to /usr/local/bin.  Finally, copy the
+    Save alerts and monitors to the Mon alert and monitor directories,
+    respectively.  For example:
+
+        cp perl/alerts/* /usr/local/lib/mon/alert.d
+        cp perl/monitors/* /usr/local/lib/mon/mon.d
+
+    would install the Save alerts/monitors into the default
+    alert/monitor locations of a Mon installation in /usr/local.
+
+
+3. Configuration
+
+    3.1. Save configuration
+
+        3.1.1. /etc/saverc
+
+            This file contains an XML description of the various
+            configuration parameters utilized by Save.  A skeleton for
+            this file can be copied from "etc/saverc" and a full
+            description of its contents is given in "doc/saverc.txt".
+            
+            Note that this file should be world-readable to allow
+            actions such as synchronization for multiple users.
+
+    3.2. Mon configuration
+
+        3.2.1 /etc/mon/mon.cf
+
+            See the Mon documentation for a full description of this
+            file.  A sample configuration file can be found in
+            "etc/mon.cf" and Save-specific alerts and monitors are
+            described in "doc/alerts.txt" and "doc/monitors.txt",
+            respectively.
+
+        3.2.2 /etc/mon/auth.cf (Mon trap heartbeats only)
+
+            For Mon trap heartbeats to work properly, all peer systems
+            must be authorized to send Mon traps to each other.  For
+            example:
+
+                trap section
+                    host2 * *
+                    host2-priv * *
+
+            would authorize host2 and its private interface host2-priv
+            to send traps to the local system.  Note that Mon traps do
+            not work properly with IPv6-only peer addresses so ssh
+            heartbeats should be used in that case.
+
+    3.3. Firewall configuration
+
+        Mon uses UDP port 2583 by default for traps, which are used for
+        Save's heartbeat functionality.  This port must be allowed
+        through both the network between peers and the local firewall.
+
+        3.3.1. /etc/iptables.conf
+
+            For iptables, this can be done by adding the appropriate
+            rules to the INPUT chain:
+
+                -A INPUT -s 192.168.1.2/32 -p udp -m udp --dport 2583 -j ACCEPT
+                -A INPUT -p udp -m udp --dport 2583 -j DROP
+                -A INPUT -p tcp -m tcp --dport 2583 -j DROP
+
+            This assumes there is one peer host with address 192.168.1.2
+            and that the OUTPUT chain already allows outbound traffic
+            on this port.
+
+    3.4. Sysctl configuration (IPv6 only)
+
+        3.4.1. /etc/sysctl.conf
+
+            For IPv6 failover to work correctly, the following sysctl
+            settings must be set to 0:
+
+                net.ipv6.conf.X.dad_transmits
+                net.ipv6.conf.X.accept_dad
+
+            where X is the network interface associated with the IPv6
+            failover address (equal to the value of the "device6"
+            element in /etc/saverc).  For example, for a "device6"
+            setting of eth0, the following sysctl settings would be
+            required:
+
+                net.ipv6.conf.eth0.dad_transmits = 0
+                net.ipv6.conf.eth0.accept_dad = 0
+
+    3.5. SSH configuration
+
+        3.5.1. /etc/ssh/ssh_config
+
+            If the files of a large number of non-root users need to
+            be synchronized by users themselves (whether explicitly
+            or implicitly embedded within other programs), it is
+            recommended that host-based authentication be enabled
+            between peer nodes.  This is done using appropriate SSH
+            client configuration.  For example:
+
+                EnableSSHKeysign yes
+                Host host2.example.com host2
+                    HostbasedAuthentication yes
+
+            would allow the current host to use host-based authentication
+            when connecting to host2.example.com.  Note that appropriate
+            configuration on the server-side is also required as discussed
+            below.
+
+            The alternative in this case is to define private SSH keys
+            for all users (see "doc/saverc.txt").
+
+        3.5.2. /etc/ssh/sshd_config
+
+            To allow other peers to connect via host-based
+            authentication, it must be enabled within the SSH server:
+
+                HostbasedAuthentication yes
+
+            To synchronize root-owned files or to execute commands as
+            root across peers, it is necessary to allow some form of
+            root login.  The recommended form is to only allow forced
+            commands:
+
+                PermitRootLogin forced-commands-only
+
+            See "man sshd_config" for other possible values.
+
+        3.5.3. /etc/ssh/shosts.equiv
+
+            The final piece of configuration needed to support
+            host-based authentication is to add peers to the list of
+            trusted remote hosts.  For example:
+
+                host2.example.com
+
+            would allow host2.example.com to authenticate via host-based
+            authentication.
+
+        3.5.4. /root/.ssh/authorized_keys
+
+            If root-level operations are required with forced command
+            root logins, an appropriate command must be added to the
+            entry in root's authorized_keys file that corresponds to the
+            key specified for the root user in the Save configuration
+            file (see "doc/saverc.txt").  This can be done using the
+            --shift option (see "doc/usage.txt"):
+
+                from="host2.example.com",command="/usr/local/bin/save \
+                    --shift $SSH_ORIGINAL_COMMAND" ssh-rsa ...
+
+            Note that the line join (\) is for readability only and
+            should not be used in real key files.  This command would
+            allow root logins from host2.example.com and allow Save to
+            be executed with the first argument (which will be the
+            invocation of Save in the normal case) shifted off.
+
+            If synchronized commands are not required, it is recommended
+            to add an additional --shift and the --file option, which
+            disables command processing:
+
+                from="host2.example.com",command="/usr/local/bin/save \
+                    --file --shift --shift $SSH_ORIGINAL_COMMAND" ssh-rsa ...
+
+            This prevents arbitrary commands from being executed with
+            this key.
+
+
+4. Activation
+
+    Save is automatically activated within Mon.  Mon is typically
+    activated using:
+    
+        /etc/init.d/mon start
+
+    To ensure Mon is always running, it can be added to a root crontab.
+    For example:
+
+        */2 * * * * /usr/bin/env PATH=/sbin:/bin:/usr/bin /etc/init.d/mon start >/dev/null 2>&1
+
+    would execute Mon every two minutes.  This is a noop if Mon is
+    already running.
+

@@ -1,0 +1,133 @@
+Save Monitors
+=============
+
+Save includes a number of monitors for use with Mon.
+
+1. save.monitor
+
+    This monitor implements the main heartbeat functionality of Save.
+    For any host that is in the passive state, this monitor is a noop
+    and returns success.  A failure is returned when a node is down or
+    when there is any failure accessing the Save configuration or state.
+    Otherwise, this monitor sends a Mon trap containing an authenticated
+    heartbeat with the current node state to all hosts defined in the
+    parent hostgroup.
+
+    This monitor should always be paired with a trap timeout on passive
+    nodes, which corresponds to a failure to receive a heartbeat from
+    the active node.  For example:
+
+        watch peers
+            ...
+            interval 3s
+            traptimeout 11s
+            monitor save.monitor
+                period wd {Sun-Sat}
+                    alert save.alert
+ 
+    would execute the Save monitor on all hosts.  The active node will
+    send heartbeats to all passive nodes every 3 seconds.  Passive
+    nodes expect a heartbeat to be received within 11 seconds or will
+    take appropriate action within the Save alert.
+
+
+2. banner.monitor
+
+    This monitor returns success if the TCP banner returned by a given
+    port (defined by --port) on a host matches a given regular
+    expression (defined by --regex) or failure otherwise.  It is
+    intended as an additional check after ping to make sure a service is
+    still actively processing connections.  For example:
+
+        monitor banner.monitor --port=22 --regex="^SSH"
+
+    checks that sshd is still returning the expected banner that begins
+    with "SSH".
+
+    The default timeout is 5 seconds, but this can be changed using
+    --timeout (e.g. --timeout=2).
+ 
+
+3. inverse.monitor
+
+    This monitor returns the inverse of the success or failure of
+    another monitor given as its argument (with any arguments of its
+    own).  It was originally intended to be used to switch the heartbeat
+    to a second network interface if the main interface was down or
+    could not access the network.  For example, for a two-node
+    configuration:
+
+        watch peer
+            ...
+            service iping
+                monitor inverse.monitor netping.monitor
+                ...
+
+        watch peerbak
+            ...
+            service save
+                depend peer:iping
+                monitor save.monitor
+                ...
+
+    would switch heartbeats to a secondary address for the peer if the
+    original peer address cannot be pinged.
+
+    While this was its original intent, it can also be used with other
+    monitors for various purposes.  For example, the inverse of the
+    passive monitor can be used for performing monitoring specific to
+    the active node.
+
+
+4. netping.monitor
+
+    This monitor returns success if a host is reachable on an optional
+    port (given by --port) by a given protocol (defined by --proto) or
+    failure otherwise.  Supported protocols include "tcp", "udp",
+    "icmp", "stream", "syn", or "external" (see man Net::Ping for
+    details) with the default being icmp.  For example:
+    
+        monitor netping.monitor --proto=syn --port=22
+
+    would detect whether port 22 responds to a syn.
+
+
+5. passive.monitor
+
+    This monitor return success if the current node is in a passive
+    state and failure if the current node is active.  It is intended
+    to be used with the Mon "depend" statement when monitoring the
+    failover address to prevent the active node from monitoring itself
+    (which will typically already be done in a separate hostgroup).
+    For example:
+
+        watch self
+            ...
+            monitor passive.monitor
+            ...
+
+        watch active
+            ...
+            service active_service
+                depend self.passive
+                ...
+
+    would only process the active_sevice service statements when a node
+    is in passive mode.
+
+
+6. pid.monitor
+
+    This monitor reads the pid file of a local service (defined by
+    --pid_file) and returns sucess if that pid is still running with the
+    expected service executable (defined by --cmd_path) or failure
+    otherwise.  For example:
+
+        monitor pid.monitor --pid_file=/var/run/sshd.pid \
+            --cmd_path=/usr/sbin/sshd ;;
+ 
+    would monitor the sshd service with the pid file located at
+    /var/run/sshd.pid and the executable at /usr/sbin/sshd.  Note that
+    the double semi-colon indicates that Mon does not need to add the
+    set of hosts in the parent hostgroup.
+

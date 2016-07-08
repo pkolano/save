@@ -1,0 +1,78 @@
+Save Alerts
+===========
+
+Save includes a number of alerts for use with Mon.
+
+1. save.alert
+
+    This alert implements the main IP failover functionality of Save.
+    It is used to give and take the failover address based on various
+    failure conditions.  If a node detects a failure within itself, a
+    "give" argument should be used.  For example (assuming an
+    appropriately defined hostgroup called "self"):
+
+        watch self
+            ...
+            monitor netping.monitor --proto=syn --port=22
+                period wd {Sun-Sat}
+                    alert save.alert give
+
+    uses the netping monitor to detect whether the local sshd is
+    listening on port 22.  If not, the Save alert is used to give up
+    the failover address to another node.  Note that this is a noop if
+    the local node does not have the failover address.
+
+    If a node detects a failure within the active node, a "take"
+    argument should be used.  For example (assuming an appropriately
+    defined hostgroup called "active"):
+
+        watch active
+            ...
+            depend self:passive
+            monitor banner.monitor --port=22 --regex="^SSH"
+                period wd {Sun-Sat}
+                    alert save.alert take
+
+    uses the banner monitor to detect whether sshd on the node that
+    currently has the failover address is responding with the
+    appropriate SSH banner.  If not, the Save alert is used to take
+    the failover address.
+
+    The Save alert has special functionality when used with the Save
+    monitor.  The Save state of each node is initialized by using a
+    Save startup alert with a "passive" argument.  Heartbeats are
+    processed on passive nodes by using a Save alert without any
+    arguments.  For example (assuming an appropriately defined
+    hostgroup called "peers"):
+
+        watch peers
+            ...
+            traptimeout 11s
+            monitor save.monitor
+                period wd {Sun-Sat}
+                    startupalert save.alert passive
+                    alert save.alert
+ 
+    uses a Save startup alert to initialize the state of each node to
+    passive and then uses the Save alert to process traps sent by the
+    active node in the Save monitor.
+
+
+2. exec.alert
+
+    This alert can be used to execute an arbitrary program.  It is
+    intended as a way to restart services that were detected as down.
+    All arguments to this alert are passed directly to an exec() call.
+    For example (assuming an appropriately defined hostgroup called
+    "self"):
+
+        watch self
+            ...
+            monitor pid.monitor --pid_file=/var/run/sshd.pid \
+                    --cmd_path=/usr/sbin/sshd ;;
+                period wd {Sun-Sat}
+                    alert exec.alert /etc/init.d/ssh restart
+ 
+    uses the pid monitor to detect if sshd is running.  If not, the exec
+    alert is used to restart sshd using its /etc/init.d script.
+

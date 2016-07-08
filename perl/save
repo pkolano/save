@@ -1,0 +1,230 @@
+#!/usr/bin/perl
+#
+# Copyright (C) 2010 United States Government as represented by the
+# Administrator of the National Aeronautics and Space Administration
+# (NASA).  All Rights Reserved.
+#
+# This software is distributed under the NASA Open Source Agreement
+# (NOSA), version 1.3.  The NOSA has been approved by the Open Source
+# Initiative.  See http://www.opensource.org/licenses/nasa1.3.php
+# for the complete NOSA document.
+#
+# THE SUBJECT SOFTWARE IS PROVIDED "AS IS" WITHOUT ANY WARRANTY OF ANY
+# KIND, EITHER EXPRESSED, IMPLIED, OR STATUTORY, INCLUDING, BUT NOT
+# LIMITED TO, ANY WARRANTY THAT THE SUBJECT SOFTWARE WILL CONFORM TO
+# SPECIFICATIONS, ANY IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+# A PARTICULAR PURPOSE, OR FREEDOM FROM INFRINGEMENT, ANY WARRANTY THAT
+# THE SUBJECT SOFTWARE WILL BE ERROR FREE, OR ANY WARRANTY THAT
+# DOCUMENTATION, IF PROVIDED, WILL CONFORM TO THE SUBJECT SOFTWARE. THIS
+# AGREEMENT DOES NOT, IN ANY MANNER, CONSTITUTE AN ENDORSEMENT BY
+# GOVERNMENT AGENCY OR ANY PRIOR RECIPIENT OF ANY RESULTS, RESULTING
+# DESIGNS, HARDWARE, SOFTWARE PRODUCTS OR ANY OTHER APPLICATIONS RESULTING
+# FROM USE OF THE SUBJECT SOFTWARE.  FURTHER, GOVERNMENT AGENCY DISCLAIMS
+# ALL WARRANTIES AND LIABILITIES REGARDING THIRD-PARTY SOFTWARE, IF
+# PRESENT IN THE ORIGINAL SOFTWARE, AND DISTRIBUTES IT "AS IS".
+#
+# RECIPIENT AGREES TO WAIVE ANY AND ALL CLAIMS AGAINST THE UNITED STATES
+# GOVERNMENT, ITS CONTRACTORS AND SUBCONTRACTORS, AS WELL AS ANY PRIOR
+# RECIPIENT.  IF RECIPIENT'S USE OF THE SUBJECT SOFTWARE RESULTS IN ANY
+# LIABILITIES, DEMANDS, DAMAGES, EXPENSES OR LOSSES ARISING FROM SUCH USE,
+# INCLUDING ANY DAMAGES FROM PRODUCTS BASED ON, OR RESULTING FROM,
+# RECIPIENT'S USE OF THE SUBJECT SOFTWARE, RECIPIENT SHALL INDEMNIFY AND
+# HOLD HARMLESS THE UNITED STATES GOVERNMENT, ITS CONTRACTORS AND
+# SUBCONTRACTORS, AS WELL AS ANY PRIOR RECIPIENT, TO THE EXTENT PERMITTED
+# BY LAW.  RECIPIENT'S SOLE REMEDY FOR ANY SUCH MATTER SHALL BE THE
+# IMMEDIATE, UNILATERAL TERMINATION OF THIS AGREEMENT.
+#
+
+use strict;
+use Cwd qw(abs_path cwd);
+use File::Basename;
+use Getopt::Long qw(:config bundling no_ignore_case require_order);
+use POSIX;
+use XML::Simple;
+
+our $VERSION = 0.25;
+
+my $saverc = "/etc/saverc";
+
+# parse options
+my %opts = (
+    timeout => 2,
+);
+$opts{help} = 1 if (scalar(@ARGV) == 0);
+GetOptions(\%opts,
+    "after", "archive", "before", "cwd=s", "down", "file", "force", "give",
+    "help", "remote", "shift+", "status", "sync", "sync_cmd", "take",
+    "timeout=i", "up", "validate",
+) or die "Invalid options\n";
+
+if ($opts{help}) {
+    my $base = basename($0);
+    print "Usage: $base [OPTION]... COMMAND\n";
+    print "\n";
+    print "Check failover status or execute COMMAND with associated\n";
+    print "synchronization, archival, and/or validation actions\n";
+    print "\n";
+    print "Options (defaults in brackets):\n";
+    print "    --after         perform after actions\n";
+    print "    --archive       perform archival actions\n";
+    print "    --before        perform before actions\n";
+    print "    --cwd=PATH      set working directory for commands to PATH\n";
+    print "    --down          bring node down\n";
+    print "    --file          indicate argument is file instead of command\n";
+    print "    --force         force actions even if file does not exist\n";
+    print "    --give          give up IP address\n";
+    print "    --help          help\n";
+    print "    --remote        indicate invocation was from remote action\n";
+    print "    --shift         shift arguments one or more times\n";
+    print "    --status        print current state\n";
+    print "    --sync          perform synchronization actions\n";
+    print "    --sync_cmd      execute command across all nodes\n";
+    print "    --take          take IP address\n";
+    print "    --timeout=SECS  set ssh connect timeout to SECS [$opts{timeout}]\n";
+    print "    --up            bring node up\n";
+    print "    --validate      perform validation actions\n";
+    exit;
+}
+
+my $config = XMLin($saverc,
+    ForceArray => [qw(file host)],
+    KeyAttr => [],
+    NormalizeSpace => 2,
+) or die "Invalid configuration file \"$saverc\"\n";
+
+my $ssh = "ssh -aqx -oBatchMode=yes -oConnectTimeout=$opts{timeout}";
+my $user = getpwuid($<);
+if ($config->{keys}->{$user}) {
+    $ssh .= " -i " . $config->{keys}->{$user};
+}
+
+if ($opts{down} || $opts{give} || $opts{take} || $opts{up}) {
+    my $type = "give";
+    $type = "take" if ($opts{take});
+    $type = "up" if ($opts{up});
+    $type = "down" if ($opts{down});
+    my $action = $config->{heartbeat}->{alertdir} . "/save.alert $type";
+    print STDERR "#### Save $type using $action\n";
+    system($action);
+    print STDERR "#### Save $type " .
+        (!WEXITSTATUS($?) ?  "success" : "failure") . "\n";
+    exit WEXITSTATUS($?);
+}
+if ($opts{status}) {
+    my $addr = $config->{heartbeat}->{address};
+    $addr = $config->{heartbeat}->{address6} if (!$addr);
+    my $state_file = $config->{heartbeat}->{statedir} . "/save." . $addr;
+    my $state = readlink $state_file;
+    $state =~ s/\s.*//;
+    $state .= " (down)" if (-f $config->{heartbeat}->{statedir} . "/save.down");
+    print "$state\n";
+    exit 0;
+}
+if (!$opts{archive} && !$opts{sync} && !$opts{validate} && !$opts{sync_cmd}) {
+    $opts{archive} = 1;
+    $opts{sync} = 1;
+    $opts{validate} = 1;
+}
+if (!$opts{after} && !$opts{before}) {
+    $opts{after} = 1;
+    $opts{before} = 1;
+}
+chdir $opts{cwd} if ($opts{cwd});
+
+shift @ARGV while ($opts{'shift'}--);
+my @args = @ARGV;
+
+# command is first argument unless --file is specified
+my $cmd;
+if (!$opts{file}) {
+    $cmd = shift @args;
+    $cmd = fileparse($cmd);
+}
+
+# always do before case to store mtimes
+my %mtime;
+save('before') if (!$opts{sync_cmd});
+my $rc = 0;
+if (!$opts{file}) {
+    $rc = system(@ARGV);
+    $rc = WEXITSTATUS($rc);
+    if (!$rc && $opts{sync_cmd} && !$opts{remote}) {
+        # execute command on all peers
+        my $cwd = abs_path(cwd);
+        foreach my $host (@{$config->{peers}->{host}}) {
+            my $action = "$ssh $host save --sync_cmd --remote --cwd=\"$cwd\" \"" .
+                join('" "', @ARGV) . '"';
+            print STDERR "#### Save sync_cmd using $action\n";
+            system($action);
+            print STDERR "#### Save sync_cmd " .
+                (!WEXITSTATUS($?) ?  "success" : "failure") . "\n";
+        }
+    }
+}
+save('after') if ($opts{after} && !$opts{sync_cmd});
+exit $rc;
+
+sub save {
+    my $time = shift;
+    my $stop = $rc;
+    foreach my $file (@args) {
+        last if ($file eq '--save_stop');
+        next if (!-f $file && !$opts{force});
+        my $abs = abs_path($file);
+        $file = $abs if ($abs);
+        my $dirname = dirname($file);
+        my $basename = basename($file);
+        my $mtime = (stat $file)[9];
+        if (!$mtime{$file}) {
+            $mtime{$file} = $mtime;
+        } else {
+            # skip files that are unchanged
+            next if (!$opts{file} && $mtime == $mtime{$file});
+        }
+        next if (!$opts{$time});
+        foreach my $cfile (@{$config->{files}->{file}}) {
+            my $path;
+            $path .= abs_path($cfile->{directory}) . "/"
+                if ($cfile->{directory});
+            $path .= $cfile->{name} if ($cfile->{name});
+            next if ($file !~ qr/$path/);
+            # do validate actions, then sync actions, then archive actions
+            foreach my $type (qw(validate sync archive)) {
+                next if (!$opts{$type});
+                my $msg = "#### Save $type-$time";
+                foreach my $cmd (keys(%{$cfile->{$time}})) {
+                    $cmd = "remote-$cmd" if ($type eq 'sync' && $opts{remote});
+                    next if ($stop || !$config->{$type}->{$cmd});
+                    foreach my $host (@{$config->{peers}->{host}}) {
+                        my $action = $config->{$type}->{$cmd};
+                        $action =~ s/\$basename/$basename/g;
+                        $action =~ s/\$dirname/$dirname/g;
+                        $action =~ s/\$file/$file/g;
+                        $action =~ s/\$host/$host/g;
+                        if ($type eq 'sync' && !$opts{remote}) {
+                            $action =~ s/\$ssh/$ssh $host save --file --force --remote --sync $file --save_stop/g;
+                        } else {
+                            $action =~ s/\$ssh/$ssh/g;
+                        }
+                        print STDERR "$msg using $action\n";
+                        system($action);
+                        $stop = $stop || WEXITSTATUS($?);
+                        print STDERR "$msg " . ($stop ? "failure" : "success") . "\n";
+                        if (!$stop && $type eq 'archive' && !$opts{remote}) {
+                            # sync archive
+                            $action = "$ssh $host save --file --force --remote --archive $file --save_stop";
+                            print STDERR "$msg using $action\n";
+                            system($action);
+                            $stop = $stop || WEXITSTATUS($?);
+                            print STDERR "$msg " .
+                                ($stop ? "failure" : "success") . "\n";
+                        }
+                        # only do validation locally
+                        last if ($type eq 'validate');
+                    }
+                }
+            }
+        }
+    }
+}
+

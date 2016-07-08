@@ -1,0 +1,121 @@
+# sample Mon configuration file
+
+# Note that this was originally for a two-node configuration
+# so the alternate interface stuff may not work properly on
+# a configuration with more nodes.  This can probably be fixed
+# by using a different dep_behavior setting (see Mon man page).
+# Also note that the passive monitor and active hostgroup were
+# recent additions to show how this could apply to more than
+# two nodes but it has not been extensively tested.
+
+# evaluate dependencies before monitors execute
+dep_behavior = m
+
+# server should not listen for remote connections
+serverbind = localhost
+
+# define host groups
+hostgroup gateway 192.168.1.1
+hostgroup self host1
+hostgroup active 192.168.1.2
+hostgroup peers host2
+hostgroup peersbak host2-priv
+
+
+# gateway monitoring
+watch gateway
+    service ping
+        description ping monitor
+        interval 2s
+        monitor netping.monitor
+
+
+# active node monitoring
+watch active
+    # take failover address if sshd doesn't respond to syn pings
+    service sshd.ping
+        description active sshd monitor
+        interval 31s
+        depend gateway:ping
+        depend self:passive
+        monitor netping.monitor --proto=syn --port=22
+            period wd {Sun-Sat}
+                alert save.alert take
+
+    # take failover address if sshd doesn't respond with correct banner
+    service sshd.banner
+        description sshd banner monitor
+        interval 53s
+        depend active:sshd.ping
+        monitor banner.monitor --port=22 --regex="^SSH"
+            period wd {Sun-Sat}
+                alert save.alert take
+
+
+# peer node monitoring
+watch peers
+    # process Save heartbeats on both active and passive nodes
+    service save
+        description save processor
+        interval 3s
+        traptimeout 11s
+        monitor save.monitor
+            period wd {Sun-Sat}
+                startupalert save.alert passive
+                alert save.alert
+
+    # determine if peers are up
+    service iping
+        description inverse ping monitor
+        interval 5s
+        monitor inverse.monitor netping.monitor
+
+
+# peer node monitoring on alternate interface
+watch peersbak
+    # send heartbeat on alternate interface if primary unavailable
+    service save
+        description alternate interface save processor
+        interval 3s
+        depend peers:iping
+        monitor save.monitor
+
+
+# self monitoring
+watch self
+    # restart sshd if process no longer exists
+    # give up failover address if this keeps happening
+    service sshd.pid
+        description sshd pid monitor
+        interval 19s
+        monitor pid.monitor --pid_file=/var/run/sshd.pid --cmd_path=/usr/sbin/sshd ;;
+            period wd {Sun-Sat}
+                alert exec.alert /etc/init.d/ssh restart
+            period failover: wd {Sun-Sat}
+                alertafter 3 10m
+                alert save.alert give
+
+    # give up failover address if sshd doesn't respond to syn pings
+    service sshd.ping
+        description sshd ping monitor
+        interval 41s
+        depend self:sshd.pid
+        monitor netping.monitor --proto=syn --port=22
+            period wd {Sun-Sat}
+                alert save.alert give
+
+    # give up failover address if sshd doesn't respond with correct banner
+    service sshd.banner
+        description sshd banner monitor
+        interval 61s
+        depend self:sshd.ping
+        monitor banner.monitor --port=22 --regex="^SSH"
+            period wd {Sun-Sat}
+                alert save.alert give
+
+    # check if passive
+    service passive
+        description passive monitor
+        interval 11s
+        monitor passive.monitor
+

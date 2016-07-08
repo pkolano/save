@@ -1,0 +1,266 @@
+Using Save
+==========
+
+1. Save options
+
+    Invoking Save with no arguments or with the --help option will print
+    a usage summary:
+
+        Usage: save [OPTION]... COMMAND
+
+        Check failover status or execute COMMAND with associated
+        synchronization, archival, and/or validation actions
+
+        Options (defaults in brackets):
+            --after         perform after actions
+            --archive       perform archival actions
+            --before        perform before actions
+            --cwd=PATH      set working directory for commands to PATH
+            --down          bring node down
+            --file          indicate argument is file instead of command
+            --force         force actions even if file does not exist
+            --give          give up IP address
+            --help          help
+            --shift         shift arguments one or more times
+            --status        print current state
+            --sync          perform synchronization actions
+            --sync_cmd      execute command across all nodes
+            --take          take IP address
+            --timeout=SECS  set ssh connect timeout to SECS [2]
+            --up            bring node up
+            --validate      perform validation actions
+
+
+2. Option notes
+
+    2.1. Failover management
+
+        2.1.1. Status
+
+            The --status option displays the current failover state of
+            the current node.  The state is one of active, passive,
+            give, or take.  Additionally, the state will show whether
+            the node has been marked as down.  For example, if:
+
+                save --status
+
+            results in:
+
+                passive (down)
+
+            this would indicate that the node is in a passive state
+            and is down.
+
+            Note that output represents the internal state maintained by
+            Save and may not always correspond to the actual state of
+            the network.  For example, when a node transitions to the
+            Save active state, it will have the failover address
+            locally and will have sent out a gratuitous ARP, but that
+            ARP may take a few seconds to take effect within the network
+            devices to which the node is attached.  A node will keep
+            trying until it for sure has the address.
+            
+            To determine if failover address traffic is being routed to
+            the current node, you may invoke tcpdump (or equivalent) on
+            the corresponding network interface and then ping the node
+            externally.  If the ping traffic shows up, traffic is being
+            correctly routed.
+            
+        2.1.2. Give
+
+            When executed on the active node, the --give option will
+            attempt to yield the failover address to the passive node.
+            A give on the passive node has no effect.  Give takes no
+            additional arguments:
+
+                save --give
+            
+            Note that a give can sometimes fail depending on the
+            frequency at which various monitors run since a peer monitor
+            may run just after the passive node takes over but just
+            before it has acquired the failover address.  This scenario
+            can be avoided by using the Mon "alertafter" option to allow
+            more than one failure, which should give the passive node
+            enough time to complete the transition.
+            
+        2.1.3. Take
+
+            When executed on the passive node, the --give option will
+            attempt to take over the failover address from the active
+            node.  A take on the active node has no effect.  Take takes
+            no additional arguments:
+
+                save --take
+
+            Note that a take can sometimes fail depending on the
+            frequency at which various monitors run since a peer monitor
+            may run just after the passive node takes over but just
+            before it has acquired the failover address.  This scenario
+            can be avoided by using the Mon "alertafter" option to allow
+            more than one failure, which should give the passive node
+            enough time to complete the transition.
+
+        2.1.4. Down
+
+            The --down option marks an up node as down.  It has no
+            effect on a down node.  A down node will not send
+            heartbeats when active and will not attempt to take over the
+            failover address under any condition when passive.  When
+            active and down, a node will naturally transition to the
+            passive state through a heartbeat failure condition on the
+            passive node.  Down takes no additional arguments:
+
+                save --down
+
+        2.1.5. Up
+
+            The --up option marks a down node as up.  It has no effect
+            on an up node.  A node that becomes up will resume normal
+            behavior.  Up takes no additional arguments:
+
+                save --up
+
+    2.2. Action management
+
+        The default usage model of Save is to prepend "save" to any
+        command and Save will perform the configured actions for any
+        files on the command line for which actions have been specified.
+        For example:
+
+            save vi /dir/file
+
+        would check to see if any actions have been specified for
+        /dir/file or its parent directory /dir.  If "before" actions
+        have been specified, they will be executed before vi is invoked.
+        Otherwise, vi will be invoked on /dir/file as normal.  After vi
+        exits, Save will check to see if /dir/file has been modified.
+        If so, Save will perform any "after" actions specified.  This
+        may include checking the syntax of /dir/file via validation
+        actions, synchronizing /dir/file to a peer host via
+        synchronization actions, and/or archiving a copy of /dir/file
+        via archival actions.
+
+        2.2.1. Action filters
+
+            By default, Save takes all actions associated with a given
+            file.  If deisred, the set of actions defined for a file can
+            be filtered so that only a specific subset is taken.
+
+            2.2.1.1. Before
+
+                The --before option enables execution of actions
+                defined in the "before" elements of the Save
+                configuration file.
+
+            2.2.1.2. After
+
+                The --after option enables execution of actions
+                defined in the "after" elements of the Save
+                configuration file.
+
+            2.2.1.3. Archival
+
+                The --archive option enables the execution of the
+                before or after actions defined for a file that appear
+                in the "archive" element of the Save configuration file.
+
+            2.2.1.4. Synchronization
+
+                The --sync option enables the execution of the before
+                or after actions defined for a file that appear in the
+                "sync" element of the Save configuration file.
+
+            2.2.1.5. Validation
+
+                The --validate option enables the execution of the
+                before or after actions defined for a file that appear
+                in the "validate" element of the Save configuration
+                file.
+
+        2.2.2. Explicit actions
+
+            2.2.2.1. Files
+
+                The --file option indicates that only files are given as
+                arguments (i.e. no command is given).  It also indicates
+                that file modification times should not be taken into
+                account.  This option is useful for embedding Save
+                actions within external programs that modify files of
+                interest.  For example:
+
+                    save --file /dir/file
+
+                could be embedded within a script to perform all the
+                usual actions associated with /dir/file.
+
+            2.2.2.2. Forced actions
+
+                The --force option indicates that actions should be
+                forced even if a file does not exist.  This option is
+                useful during explicit synchronizations when a file may
+                have been removed by an external program and the removal
+                of the file needs to be synchronized across peers.
+                For example:
+                
+                    save --sync --file --force /dir/file
+
+                would guarantee that the creation, modification, and/or
+                removal of /dir/file will be synchronized across peers
+                (assuming an appropriate synchronization action for
+                /dir/file or /dir has been defined in the Save
+                configuration).
+
+    2.3. Other options
+
+        2.3.1. Synchronized commands
+
+            Commands may be executed across all peers using the
+            --sync_cmd option.  For example:
+
+                save --sync_cmd ls -l
+
+            would execute the ls command on the current host and all
+            peers.  Note that the current working directory will be
+            identical across all hosts.  Synchronized commands do not
+            invoke actions that have been defined for files.
+
+        2.3.2. Argument shifting
+
+            Save arguments can be shifted one or more times using the
+            --shift option.  This option is mainly of use in SSH forced
+            commands when given $SSH_ORIGINAL_COMMAND.  For example:
+
+                save --file --shift --shift $SSH_ORIGINAL_COMMAND
+
+            when used in a forced command would invoke Save with the
+            first two arguments removed and comand processing disabled
+            (using --file).  The end result is allowing specified Save
+            actions to run, but not allowing the execution of
+            arbitrary commands.
+
+        2.3.3. Timeouts
+
+            Save uses SSH to contact peer hosts.  The --timeout=SECS
+            option can be used to set the SSH connection timeout to SECS
+            seconds.
+
+    2.4. Internal options
+
+        These options are used by Save itself and are not normally
+        needed by users unless they wish to modify/extend Save's core
+        functionality.
+
+        2.4.1. Current working directory
+
+            The --cwd=PATH option sets the working directory on all
+            peers to PATH.  This option is used automatically when
+            synchronized commands are executed via the --sync_cmd
+            option.
+
+        2.4.2. Remote command
+
+            The --remote option indicates that Save has been executed
+            via a remote command so should not take further actions on
+            any other peers.  This option is used automatically whenever
+            a command is issued on any peer.
+

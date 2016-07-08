@@ -1,0 +1,156 @@
+<!-- sample Save configuration file -->
+<saverc>
+    <log>
+        <!-- enable custom logging via command -->
+        <command>
+            /usr/local/bin/my_save_log_cmd
+        </command>
+
+        <!-- enable custom logging of only failover events via command -->
+        <command_failover>
+            /usr/local/bin/my_save_failover_cmd
+        </command_failover>
+
+        <!-- enable logging via email -->
+        <email>
+            admin@example.com
+        </email>
+
+        <!-- enable logging of only failover events via email -->
+        <email_failover>
+            netadmin@example.com
+        </email_failover>
+
+        <!-- enable logging to syslog -->
+        <syslog>
+            <!-- syslog facility (default is user so this is not needed) -->
+            <facility>user</facility>
+
+            <!-- syslog priority (default is info so this is not needed) -->
+            <priority>info</priority>
+        </syslog>
+    </log>
+
+
+    <!-- define peer hosts -->
+    <peers>
+        <host>host2.example.com</host>
+    </peers>
+
+
+    <!-- define SSH identities for users (must not have a passphrase) -->
+    <keys>
+        <!-- store root key in /etc/save/sshkey -->
+        <root>/etc/save/sshkey</root>
+    </keys>
+
+
+    <!-- define settings for heartbeats -->
+    <heartbeat>
+        <!-- ipv4 failover address -->
+        <address>192.168.1.2</address>
+
+        <!-- ipv6 failover address -->
+        <address6>::ffff:c0a8:102</address6>
+
+        <!-- location on mon alert scripts -->
+        <alertdir>/usr/local/lib/mon/alert.d</alertdir>
+
+        <!-- device used for ipv4 failover address -->
+        <device>eth0</device>
+
+        <!-- device used for ipv6 failover address -->
+        <device6>eth0</device6>
+
+        <!-- Mon group used for peer hosts -->
+        <group>peer</group>
+
+        <!-- location of heartbeat authenticator -->
+        <key>/etc/save/savekey</key>
+
+        <!-- location of mon monitor scripts -->
+        <mondir>/usr/local/lib/mon/mon.d</mondir>
+
+        <!-- network prefix of ipv4 failover address -->
+        <prefix>24</prefix>
+
+        <!-- network prefix of ipv6 failover address -->
+        <prefix6>64</prefix6>
+
+        <!-- priority of this host in case of conflicts -->
+        <priority>75</priority>
+
+        <!-- maximum time to wait for peer connection during ssh heartbeats -->
+        <ssh_timeout>30</ssh_timeout>
+
+        <!-- location of mon state directory -->
+        <statedir>/var/state/mon</statedir>
+
+        <!-- heartbeat type -->
+        <type>ssh</type>
+
+        <!-- time between heartbeats at which Save monitor reports failure -->
+        <timeout>40</timeout>
+    </heartbeat>
+
+
+    <!-- define archival actions -->
+    <archive>
+        <!-- sample RCS archival -->
+        <rcs>ci -f -t-'Save archive' -m'Save archive' -u '$file'; rcs -U '$file'; chmod u+w '$file'</rcs>
+    </archive>
+
+
+    <!-- define synchronization actions -->
+    <sync>
+        <!-- sample rsync synchronization -->
+        <rsync>rsync -e '$ssh' -goOprtv '$file' $host:'$dirname'</rsync>
+
+        <!-- sample rsync synchronization (remote side) -->
+        <remote-rsync>rsync --server -goOprtv . '$dirname'</remote-rsync>
+
+        <!-- sample rsync synchronization with directory deletion -->
+        <rsyncd>rsync -e '$ssh' -goOprtv --delete --include='$basename' --include='$basename/**' --exclude='*' . $host:'$dirname'</rsyncd>
+
+        <!-- sample rsync synchronization with directory deletion (remote side) -->
+        <remote-rsyncd>rsync --server -goOprtv --delete . '$dirname'</remote-rsyncd>
+    </sync>
+
+
+    <!-- define validation actions -->
+    <validate>
+        <!-- sample XML validator -->
+        <xml>perl -MXML::Simple -e'XMLin("$file")'</xml>
+    </validate>
+
+
+    <!-- define actions for files -->
+    <files>
+
+        <!-- define one or more file elements -->
+        <file>
+            <!-- directory containing files that actions pertain to -->
+            <directory>/etc</directory>
+
+            <!-- name of file (if not defined, then all files in directory) -->
+            <name>config.xml</name>
+
+            <!-- actions executed before command -->
+            <before>
+            </before>
+
+            <!-- actions executed after command -->
+            <after>
+                <!-- XML validation action -->
+                <xml/>
+
+                <!-- rsync synchronization action -->
+                <rsync/>
+
+                <!-- RCS archival action -->
+                <rcs/>
+            </after>
+        </file>
+    </files>
+</saverc>
+
