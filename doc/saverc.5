@@ -1,0 +1,570 @@
+.TH "saverc" "5" "09 Aug 2017" "" ""
+./"################################################################
+.SH "NAME"
+./"################################################################
+\fBsaverc\fP \(em Save configuration file
+./"################################################################
+.SH "SYNOPSIS"
+./"################################################################
+.nf
+\fB/etc/saverc\fP
+.fi
+.PP
+./"################################################################
+.SH "DESCRIPTION"
+./"################################################################
+The saverc file is an XML-formatted file that specifies various Save
+configuration items including logging, peers, SSH keys, heartbeats, and
+file actions.
+./"################################################################
+.SH "CONFIGURATION TEMPLATE"
+./"################################################################
+The basic template for the saverc file is shown below.  Individual
+elements are described in the following sections.
+.PP
+.nf
+    <saverc>
+        <log>
+            <!-- enable logging via email and/or syslog or run commands -->
+        </log>
+
+    <peers>
+        <!-- hosts involved in failover and synchronization -->
+        <host>
+            <!-- peer hostname or IP address -->
+        </host>
+        <!-- other host definitions -->
+    </peers>
+
+    <keys>
+        <!-- SSH identities used for remote actions -->
+        <user_name>
+            <!-- path to private key for user user_name -->
+        </user_name>
+        <!-- other key definitions -->
+    </keys>
+
+    <heartbeat>
+        <!-- heartbeat configuration -->
+    </heartbeat>
+
+    <archive>
+        <!-- archival actions -->
+        <archive_action_name>
+            <!-- command to execute with options and arguments -->
+        </archive_action_name>
+            <!-- other archival action definitions -->
+    </archive>
+
+    <sync>
+        <!-- synchronization actions -->
+        <sync_action_name>
+            <!-- command to execute with options and arguments -->
+        </sync_action_name>
+        <!-- other synchronization action definitions -->
+    </sync>
+
+    <validate>
+        <!-- validation actions -->
+        <validate_action_name>
+            <!-- command to execute with options and arguments -->
+        </validate_action_name>
+        <!-- other validation action definitions -->
+    </validate>
+
+    <files>
+        <!-- file/action relationships -->
+        <file>
+            <!-- file location and associated actions -->
+        </file>
+        <!-- other file definitions -->
+    </files>
+</saverc>
+.fi
+./"################################################################
+.SH "LOGGING CONFIGURATION"
+./"################################################################
+The "log" element enables custom, email, and/or syslog logging during
+Save events.
+.PP
+.nf
+    <log>
+        <!-- custom command, email, and/or syslog configuration -->
+    </log>
+.fi
+.PP
+./"================================================================
+\fBCustom logging\fP
+./"================================================================
+.RS
+Custom logging can be enabled by adding one or both of "command" and
+"command_failover" elements.  The executable defined by the "command"
+element will be triggered during all events while the "command_failover"
+executable will only be triggered during failover events:
+.PP
+.nf
+    <command>
+        <!-- executable to invoke during logging events -->
+    </commmand>
+    <command_failover>
+        <!-- executable to invoke during only failover events -->
+    </comand_failover>
+.fi
+.PP
+For example:
+.PP
+.nf
+    <command>
+        /usr/local/bin/my_logger
+    </command>
+.fi
+.PP
+would execute /usr/local/bin/my_logger during any logging events.
+.RE
+.PP
+./"================================================================
+\fBEmail logging\fP
+./"================================================================
+.RS
+Email logging can be enabled by adding one or both of "email" and
+"email_failover" elements.  The "email" element will email all events to
+the given comma-separated list of email addresses while the
+"email_failover" element will only email failover events:
+.PP
+.nf
+    <email>
+        <!-- comma-separated list of email addresses -->
+    </email>
+    <email_failover>
+        <!-- comma-separated list of email addresses -->
+    </email_failover>
+.fi
+.PP
+For example:
+.PP
+.nf
+    <email>
+        admin@example.com
+    </email>
+.fi
+.PP
+would send all events to the address "admin@example.com".
+.RE
+.PP
+./"================================================================
+\fBSyslog logging\fP
+./"================================================================
+.RS
+Syslog logging can be enabled by adding a "syslog" element:
+.PP
+.nf
+    <syslog/>
+.fi
+.PP
+By default, messages will be generated to facility "user" with
+priority "info".  This can be changed by adding "facility" and
+"priority" elements.  For example:
+.PP
+.nf
+    <syslog>
+        <facility>local1</facility>
+        <priority>debug</priority>
+    </syslog>
+.fi
+.PP
+enables syslog to facility "local1" with priority "debug".
+.RE
+./"################################################################
+.SH "PEER CONFIGURATION"
+./"################################################################
+The "peers" element defines the set of peer hosts involved in failover
+and synchronization with the current host.  Namely, heartbeats will be
+sent to all peers and synchronization actions will be performed across
+all peers.
+.PP
+.nf
+    <peers>
+        <!-- host definitions -->
+    </peers>
+.fi
+.PP
+The host name or IP address of each peer is defined within a "host"
+element.  For example:
+.PP
+.nf
+    <host>host2.example.com</host>
+.fi
+.PP
+specifies a peer with host name host2.example.com.
+./"################################################################
+.SH "KEY CONFIGURATION"
+./"################################################################
+The "keys" element specifies the SSH identity (i.e. private key) that
+should be used for any users performing actions across all peers,
+including heartbeats.  This will typically only be the root user.
+.PP
+.nf
+    <keys>
+        <!-- user key locations -->
+    </keys>
+.fi
+.PP
+The location of the private key for a given user is specified using an
+element corresponding to the user name.  For example:
+.PP
+.nf
+	<root>/root/.ssh/savekey</root>
+.fi
+.PP
+indicates that the location for the root user's private key is at
+/root/.ssh/savekey.  Note that private keys cannot have a passphrase for
+correct operation and should only be readable by the invoking user.
+./"################################################################
+.SH "HEARTBEAT CONFIGURATION"
+./"################################################################
+The "heartbeat" element defines various settings required for Save's
+heartbeat functionality to operate.
+.PP
+.nf
+    <heartbeat>
+        <!-- heartbeat configuration -->
+    </heartbeat>
+.fi
+.PP
+./"================================================================
+\fBFailover address configuration\fP
+./"================================================================
+.RS
+./"----------------------------------------------------------------
+\fBIP address\fP
+./"----------------------------------------------------------------
+.RS
+The "address" element defines the IPv4 address that will be used for
+failover between nodes.  For example:
+.PP
+.nf
+    <address>192.168.1.2</address>
+.fi
+.PP
+would set the IPv4 failover address to 192.168.1.2.
+.PP
+The "address6" element defines the IPv6 address that will be used for
+failover between nodes.  For example:
+.PP
+.nf
+    <address6>::ffff:c0a8:102</address6>
+.fi
+.PP
+would set the IPv6 failover address to ::ffff:c0a8:102.  Note that one
+or both of these elements may be used.
+.RE
+.PP
+./"----------------------------------------------------------------
+\fBNetwork interface\fP
+./"----------------------------------------------------------------
+.RS
+The "device" element defines the network interface that the IPv4
+failover address should be added to.  For example:
+.PP
+.nf
+    <device>eth0</device>
+.fi
+.PP
+would use the eth0 device for the IPv4 failover address.
+.PP
+The "device6" element defines the network interface that the IPv6
+failover address should be added to.  For example:
+.PP
+.nf
+    <device6>eth0</device6>
+.fi
+.PP
+would use the eth0 device for the IPv6 failover address.
+.PP
+Note that a "device" element is required if an "address" element is
+specified and a "device6" element is required if an "address6" element
+is specified.
+.RE
+.PP
+./"----------------------------------------------------------------
+\fBNetwork prefix\fP
+./"----------------------------------------------------------------
+.RS
+The "prefix" element defines the network prefix associated with the
+IPv4 failover address.  For example:
+.PP
+.nf
+    <prefix>24</prefix>
+.fi
+.PP
+would associate the IPv4 failover address with a /24 network.
+.PP
+The "prefix6" element defines the network prefix associated with the
+IPv6 failover address.  For example:
+.PP
+.nf
+    <prefix6>64</prefix6>
+.fi
+.PP
+would associate the IPv6 failover address with a 64-bit prefix.
+.PP
+Note that a "prefix" element is required if an "address" element is
+specified and a "prefix6" element is required if an "address6" element
+is specified.
+.RE
+.RE
+.PP
+./"================================================================
+\fBOther configuration\fP
+./"================================================================
+.RS
+./"----------------------------------------------------------------
+\fBHeartbeat timeout\fP
+./"----------------------------------------------------------------
+.RS
+The "timeout" element defines the amount of time between heartbeats
+that Save will consider an error.  This value should be set higher than
+the interval at which the heartbeat is sent by cron (or other
+mechanism).  For example:
+.PP
+.nf
+    <timeout>180</timeout>
+.fi
+.PP
+indicates that a failover will be triggered if 180 or more seconds
+have elapsed since the last heartbeat was received.
+.RE
+.PP
+./"----------------------------------------------------------------
+\fBPriority\fP
+./"----------------------------------------------------------------
+.RS
+The "priority" element defines the priority of the current
+node, which is used to resolve conflicts when multiple nodes
+attempt to take over the failover address at the same time.
+For example:
+.PP
+.nf
+    <priority>75</priority>
+.fi
+.PP
+would set the priority of the current node to 75.  Note that this value
+must be different between all peers.
+.RE
+./"################################################################
+.SH "ACTION CONFIGURATION"
+./"################################################################
+Save defines several special variables that may be referenced in
+actions.  The '$file' variable may be used to reference that file on
+which the action is to be executed.  The '$dirname' and '$basename'
+variables may be used to reference the parent directory and base name of
+the file, respectively.  The '$host' variable may be used to reference
+each peer host as it is processed.  Finally, the '$ssh' variable may be
+used to reference the SSH command-line that is constructed for each
+remote command to a peer host.
+.PP
+Actions must be designated as either validation, synchronization, or
+archival actions.  Validation actions are intended to check the syntax
+of files before they are copied to peer hosts.  They are processed first
+and are only executed on the local system.  Synchronization actions are
+intended to synchronize the contents of files across nodes.  They are
+only processed if the corresponding validation actions are successful.
+Finally, archival actions are intended to save current file state
+between synchronizations so that files may be restored if necessary.
+They are only processed if the corresponding synchronization actions are
+successful.
+.PP  
+Note that, if desired, actions may encompass activities beyond
+validation, synchronization, and archival.  For other types of
+activities, keep in mind that the different types of actions are always
+performed in the same order, validation actions are only performed
+locally, and synchronization/archival actions are processed differently
+on the remote end as described below.
+.PP
+./"================================================================
+\fBValidation actions\fP
+./"================================================================
+.RS
+The "validate" element defines the set of validation actions that may
+be used in file "before" or "after" elements.  Action sub-elements may
+be named with any valid XML identifier and define the associated
+command-line that will be executed for designated files.  For example:
+.PP
+.nf
+    <validate>
+        <xml>perl -MXML::Simple -e'XMLin("$file")'</xml>
+    </validate>
+.fi
+.PP
+defines a single validation action named "xml" that uses Perl's
+XML::Simple module to check the syntax of XML files.
+.RE
+.PP
+./"================================================================
+\fBSynchronization actions\fP
+./"================================================================
+.RS
+The "sync" element defines the set of synchronization actions that may
+be used in file "before" or "after" elements.  Action sub-elements may
+be named with any valid XML identifier and define the associated
+command-line that will be executed for designated files.
+.PP
+Each system involved in the synchronization may need to execute a
+different command depending on the program used to carry out the
+transfer.  Hence, each synchronization action must be defined in two
+parts.  For any synchronization action named "foo" that defines what is
+executed on the local system, a corresponding action "remote-foo" must
+be specified that defines what is executed on the remote system.  For
+example:
+.PP
+.nf
+    <sync>
+        <rsync>rsync -e '$ssh' -goOprtv '$file' $host:'$dirname'</rsync>
+        <remote-rsync>rsync --server -goOprtv . '$dirname'</remote-rsync>
+        <rsyncd>rsync -e '$ssh' -goOprtv --delete --include='$basename' --include='$basename/**' --exclude='*' . $host:'$dirname'</rsyncd>
+        <remote-rsyncd>rsync --server -goOprtv --delete . '$dirname'</remote-rsyncd>
+    </sync>
+.fi
+.PP
+defines two synchronization actions named "rsync" and "rsyncd".  The
+"rsync" action shows how the rsync program can be used to synchronize a
+single file between systems.  The "rsyncd" action shows how rsync can be
+used to synchronize a directory and its contents including the removal
+of the directory itself.
+.RE
+.PP
+./"================================================================
+\fBArchival actions\fP
+./"================================================================
+.RS
+The "archive" element defines the set of archival actions that may be
+used in file "before" or "after" elements.  Action sub-elements may be
+named with any valid XML identifier and define the associated
+command-line that will be executed for designated files.  For example:
+.PP
+.nf
+    <archive>
+        <rcs>ci -f -t-'Save archive' -m'Save archive' -u '$file'; rcs -U '$file'; chmod u+w '$file'</rcs>
+    </archive>
+.fi
+.PP
+defines a single archival action named "rcs" that shows how the RCS ci
+command can be used to keep a version-controlled history of a particular
+file.
+.RE
+./"################################################################
+.SH "FILE CONFIGURATION"
+./"################################################################
+The "files" element defines the set of files and/or directories and
+the individual actions associated with each.
+.PP
+.nf
+    <files>
+        <!-- set of file definitions -->
+    </files>
+.fi
+.PP
+Each file is defined within a "file" element.
+.PP
+.nf
+    <file>
+        <!-- single file definition -->
+    </file>
+.fi
+.PP
+./"================================================================
+\fBDirectory\fP
+./"================================================================
+.RS
+The "directory" element defines the location of the file or set of
+files to which actions pertain.  For example:
+.PP
+.nf
+    <directory>/etc/config</directory>
+.fi
+.PP
+indicates that the files of interest reside in /etc/config.
+.RE
+.PP
+./"================================================================
+\fBName\fP
+./"================================================================
+.RS
+The "name" element defines an optional regular expression, which, when
+present, filters the set of files in the specified directory that will
+be processed.  For example:
+.PP
+.nf
+    <name>foobar</name>
+.fi
+.PP
+indicates that the before and after actions should be applied to all
+files in the given directory that have "foobar" in their names.  Any
+Perl regular expression construct may be used in name definitions.  For
+example:
+.PP
+.nf
+    <name>(?!foobar)</name>
+.fi
+.PP
+would indicate all files that do not have "foobar" in their names.
+.RE
+.PP
+./"================================================================
+\fBBefore actions\fP
+./"================================================================
+.RS
+The "before" element defines the validation, synchronization, and/or
+archival actions that will be executed before a command involving the
+designated file or set of files.  For example:
+.PP
+.nf
+    <before>
+        <log/>
+    </before>
+.fi
+.PP
+would execute a hypothetical validation action called "log" that would
+log all access to a given set of files before they were modified by
+another program.  Note that in this case, a validation action was used
+for a general-purpose activity that should only be performed on the
+local host.
+.RE
+.PP
+./"================================================================
+\fBAfter actions\fP
+./"================================================================
+.RS
+The "after" element defines the validation, synchronization, and/or
+archival actions that will be executed after a command modifying the
+designated file or set of files.  For example:
+.PP
+.nf
+    <after>
+        <xml/>
+        <rsync/>
+        <rcs/>
+    </after>
+.fi
+.PP
+would indicate that the previously defined XML validation action,
+rsync synchronization action, and RCS archival action should be executed
+whenever the designated file or files have been modified.
+.RE
+./"################################################################
+.SH "FILES"
+./"################################################################
+/etc/saverc
+.RS
+This file specifies various Save configuration items including
+logging, peers, SSH keys, heartbeats, and file actions.
+.RE
+./"################################################################
+.SH "AUTHOR"
+./"################################################################
+Save was written by Paul Kolano.
+./"################################################################
+.SH "SEE ALSO"
+./"################################################################
+save(1)
+

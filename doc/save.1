@@ -1,0 +1,282 @@
+.TH "save" "1" "09 Aug 2017" "" ""
+./"################################################################
+.SH "NAME"
+./"################################################################
+\fBsave\fP \(em a lightweight framework for implementing highly
+available network-accessible services
+./"################################################################
+.SH "SYNOPSIS"
+./"################################################################
+.nf
+\fBsave\fP [OPTION]... COMMAND
+.fi
+.PP
+Send/monitor heartbeats, check/modify failover status, or execute
+COMMAND with associated synchronization, archival, and/or validation
+actions
+./"################################################################
+.SH "DESCRIPTION"
+./"################################################################
+Save is a framework for implementing highly available network-accessible
+services.  Save provides heartbeat functionality so that passive
+servers can detect if the active server is still available and the
+ability to give/take the service IP address using gratuitous ARP.
+.PP
+In addition to the heartbeat functionality, Save provides an interface
+to control IP failover.  In particular, the administrator can force the
+active node to yield the failover IP address, force the backup node to
+take over the failover IP address, or label a node as down so that it
+will not attempt to take over the failover IP address under any
+condition.
+.PP
+Save also provides validation, archival, and synchronization features.
+Validation is used to make sure that a configuration file conforms to
+some specified characteristics such as format before it is installed on
+other nodes.  Archival is used to save a copy of the previous
+configuration if, for some reason, the new configuration results in
+errant behavior.  Finally, synchronization features can be used to keep
+files consistent between the active and passive node(s) and/or to
+execute the same command across all nodes at once.
+.PP
+The Save configuration file determines what actions will be taken at
+which times.  The administrator need only prepend the "save" command
+(i.e. the name of the tool) to any command and the appropriate actions
+will be taken if they are applicable.  In this way, administrators can
+simply perform their normal tasks, such as editing files (e.g. "save vi
+/etc/config/file"), and Save will take care of checking validity,
+backing up old versions, and synchronizing files across systems if
+required.  For files for which there are no specific actions defined
+within the Save configuration, the "save" command has no effect, which
+allows the administrator to safely prepend this to any command.
+./"################################################################
+.SH "OPTIONS SUMMARY"
+./"################################################################
+The following options are available in save.  Defaults are shown in
+brackets.  The \(cq\&=\(cq\& for options that take a parameter is
+optional; whitespace may be used instead.  Detailed descriptions are
+given in following sections.
+.PP
+.nf
+\-\-after         perform after actions
+\-\-archive       perform archival actions
+\-\-before        perform before actions
+\-\-cwd=PATH      set working directory for commands to PATH
+\-\-down          bring node down
+\-\-file          indicate argument is file instead of command
+\-\-force         force actions even if file does not exist
+\-\-give          give up IP address
+\-\-heartbeat     send/monitor heartbeats
+\-\-help          help
+\-\-remote        indicate invocation was from remote action
+\-\-shift         shift arguments one or more times
+\-\-status        print current state
+\-\-sync          perform synchronization actions
+\-\-sync\-cmd      execute command across all nodes
+\-\-take          take IP address
+\-\-timeout=SECS  set ssh connect timeout to SECS [2]
+\-\-up            bring node up
+\-\-validate      perform validation actions
+.fi
+./"################################################################
+.SH "HEARTBEATS"
+./"################################################################
+.IP "\fB\-\-heartbeat\fP"
+When not in the passive or down states, send heartbeats to peers via
+ssh.  In all states, monitor peer heartbeat status and trigger take over
+of failover IP address when peer has not sent a heartbeat in the
+configured timeout period or when peer is attempting to take
+failover IP address at lower priority than the configured local
+priority.  When in the active state, ensure that the local host still
+owns the failover IP address.
+.IP
+Save is a command-line utility and not a daemon so heartbeats must be
+triggered periodically by another service such as cron or systemd
+timers.  It is recommended that Save be invoked at least once a minute.
+The \fB\-\-timeout\fP option can be used to adjust the amount of time
+Save will wait for the remote ssh daemon to respond.  For example, the
+following:
+.PP
+.RS
+.nf
+    \fB* * * * * /usr/local/bin/save --heartbeat --timeout=30 >/dev/null 2>&1\fP
+.fi
+.RE
+.PP
+.IP
+would run save every minute while waiting 30 seconds for the remote
+sshd on each heartbeat attempt.
+./"################################################################
+.SH "FAILOVER MANAGEMENT"
+./"################################################################
+.IP "\fB\-\-down\fP"
+Mark an up node as down.  It has no effect on a down node.  A down
+node will not send heartbeats when active and will not attempt to take
+over the failover address under any condition when passive.  When active
+and down, a node will naturally transition to the passive state through
+a heartbeat failure condition on the passive node.
+.IP "\fB\-\-give\fP"
+When executed on the active node, this option will attempt to yield
+the failover address to the passive node.  A give on the passive node
+has no effect.
+.IP "\fB\-\-status\fP"
+Display the current failover state of the current node.  The state is
+one of active, passive, give, or take.  Additionally, the state will
+show whether the node has been marked as down.  For example, a return
+of "passive (down)" would indicate that the node is in a passive state
+and is down.
+.IP
+Note that output represents the internal state maintained by Save and
+may not always correspond to the actual state of the network.  For
+example, when a node transitions to the Save active state, it will have
+the failover address locally and will have sent out a gratuitous ARP,
+but that ARP may take a few seconds to take effect within the network
+devices to which the node is attached.  A node will keep trying until it
+for sure has the address.
+.IP
+To determine if failover address traffic is being routed to the current
+node, you may invoke tcpdump (or equivalent) on the corresponding
+network interface and then ping the node externally.  If the ping
+traffic shows up, traffic is being correctly routed.
+.IP "\fB\-\-take\fP"
+When executed on the passive node, this option will attempt to take
+over the failover address from the active node.  A take on the active
+node has no effect.
+.IP "\fB\-\-up\fP"
+Mark a down node as up.  It has no effect on an up node.  A node that
+becomes up will resume normal behavior.
+./"################################################################
+.SH "ACTION MANAGEMENT
+./"################################################################
+The default usage model of Save is to prepend "save" to any command
+and Save will perform the configured actions for any files on the
+command line for which actions have been specified.  For example:
+.PP
+.RS
+.nf
+\fBsave vi /dir/file\fP
+.fi
+.RE
+.PP
+would check to see if any actions have been specified for /dir/file or
+its parent directory /dir.  If "before" actions have been specified,
+they will be executed before vi is invoked.  Otherwise, vi will be
+invoked on /dir/file as normal.  After vi exits, Save will check to see
+if /dir/file has been modified.  If so, Save will perform any "after"
+actions specified.  This may include checking the syntax of /dir/file
+via validation actions, synchronizing /dir/file to a peer host via
+synchronization actions, and/or archiving a copy of /dir/file via
+archival actions.  By default, Save takes all actions associated with
+a given file.  If desired, the set of actions defined for a file can be
+filtered so that only a specific subset is taken.
+.IP "\fB\-\-after\fP"
+Enable execution of actions defined in the "after" elements of the
+Save configuration file.
+.IP "\fB\-\-archive\fP"
+Enable the execution of the before or after actions defined for a file
+that appear in the "archive" element of the Save configuration file.
+.IP "\fB\-\-before\fP"
+Enable execution of actions defined in the "before" elements of the
+Save configuration file.
+.IP "\fB\-\-file\fP"
+Indicate that only files are given as arguments (i.e. no command is
+given).  It also indicates that file modification times should not be
+taken into account.  This option is useful for embedding Save actions
+within external programs that modify files of interest.  For example:
+.PP
+.RS
+.nf
+    \fBsave --file /dir/file\fP
+.fi
+.RE
+.PP
+.IP
+could be embedded within a script to perform all the usual actions
+associated with /dir/file.
+.IP "\fB\-\-force\fP"
+Indicate that actions should be forced even if a file does not exist.
+This option is useful during explicit synchronizations when a file may
+have been removed by an external program and the removal of the file
+needs to be synchronized across peers.  For example:
+.PP
+.RS
+.nf
+    \fBsave --sync --file --force /dir/file\fP
+.fi
+.RE
+.PP
+.IP
+would guarantee that the creation, modification, and/or removal of
+/dir/file will be synchronized across peers (assuming an appropriate
+synchronization action for /dir/file or /dir has been defined in the
+Save configuration).
+.IP "\fB\-\-sync\fP"
+Enable the execution of the before or after actions defined for a file
+that appear in the "sync" element of the Save configuration file.
+.IP "\fB\-\-validate\fP"
+Enable the execution of the before or after actions defined for a file
+that appear in the "validate" element of the Save configuration file.
+./"################################################################
+.SH "OTHER OPTIONS
+./"################################################################
+.IP "\fB\-\-sync\-cmd\fP"
+Execute command across all peers.  For example:
+.PP
+.RS
+.nf
+    \fBsave --sync-cmd ls -l\fP
+.fi
+.RE
+.PP
+.IP
+would execute the ls command on the current host and all peers.  Note
+that the current working directory will be identical across all hosts.
+Synchronized commands do not invoke actions that have been defined for
+files.
+.IP "\fB\-\-shift\fP"
+Shift arguments one or more times.  This option is mainly of use in
+SSH forced commands when given $SSH_ORIGINAL_COMMAND.  For example:
+.PP
+.RS
+.nf
+    \fBsave --file --shift --shift $SSH_ORIGINAL_COMMAND\fP
+.fi
+.RE
+.PP
+.IP
+when used in a forced command would invoke Save with the first two
+arguments removed and comand processing disabled (using --file).  The
+end result is allowing specified Save actions to run, but not allowing
+the execution of arbitrary commands.
+.IP "\fB\-\-timeout=SECS\fP"
+Set the SSH connection timeout to SECS seconds when contacting peer
+hosts.
+./"################################################################
+.SH "INTERNAL OPTIONS
+./"################################################################
+These options are used by Save itself and are not normally needed by
+users unless they wish to modify/extend Save's core functionality.
+.IP "\fB\-\-cwd=PATH\fP"
+Set the working directory on all peers to PATH.  This option is used
+automatically when synchronized commands are executed via the
+\fB\-\-sync\-cmd\fP option.
+.IP "\fB\-\-remote\fP"
+Indicate that Save has been executed via a remote command so should
+not take further actions on any other peers.  This option is used
+automatically whenever a command is issued on any peer.
+./"################################################################
+.SH "FILES"
+./"################################################################
+/etc/saverc
+.RS
+This file specifies various configuration items including logging,
+peers, SSH keys, heartbeats, and file actions.
+.RE
+./"################################################################
+.SH "AUTHOR"
+./"################################################################
+Save was written by Paul Kolano.
+./"################################################################
+.SH "SEE ALSO"
+./"################################################################
+tcpdump(1), crontab(5), saverc(5), cron(8), ping(8)
+ 

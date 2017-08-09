@@ -53,23 +53,11 @@
         <!-- ipv6 failover address -->
         <address6>::ffff:c0a8:102</address6>
 
-        <!-- location on mon alert scripts -->
-        <alertdir>/usr/local/lib/mon/alert.d</alertdir>
-
         <!-- device used for ipv4 failover address -->
         <device>eth0</device>
 
         <!-- device used for ipv6 failover address -->
         <device6>eth0</device6>
-
-        <!-- Mon group used for peer hosts -->
-        <group>peer</group>
-
-        <!-- location of heartbeat authenticator -->
-        <key>/etc/save/savekey</key>
-
-        <!-- location of mon monitor scripts -->
-        <mondir>/usr/local/lib/mon/mon.d</mondir>
 
         <!-- network prefix of ipv4 failover address -->
         <prefix>24</prefix>
@@ -80,16 +68,7 @@
         <!-- priority of this host in case of conflicts -->
         <priority>75</priority>
 
-        <!-- maximum time to wait for peer connection during ssh heartbeats -->
-        <ssh_timeout>30</ssh_timeout>
-
-        <!-- location of mon state directory -->
-        <statedir>/var/state/mon</statedir>
-
-        <!-- heartbeat type -->
-        <type>ssh</type>
-
-        <!-- time between heartbeats at which Save monitor reports failure -->
+        <!-- time between heartbeats at which Save considers peer down -->
         <timeout>40</timeout>
     </heartbeat>
 
@@ -104,10 +83,10 @@
     <!-- define synchronization actions -->
     <sync>
         <!-- sample rsync synchronization -->
-        <rsync>rsync -e '$ssh' -goOprtv '$file' $host:'$dirname'</rsync>
+        <rsync>rsync -e '$ssh' -goOprv '$file' $host:'$dirname'</rsync>
 
         <!-- sample rsync synchronization (remote side) -->
-        <remote-rsync>rsync --server -goOprtv . '$dirname'</remote-rsync>
+        <remote-rsync>rsync --server -goOprv . '$dirname'</remote-rsync>
 
         <!-- sample rsync synchronization with directory deletion -->
         <rsyncd>rsync -e '$ssh' -goOprtv --delete --include='$basename' --include='$basename/**' --exclude='*' . $host:'$dirname'</rsyncd>

@@ -1,0 +1,575 @@
+#!/usr/bin/perl
+#
+# Copyright (C) 2010-2017 United States Government as represented by the
+# Administrator of the National Aeronautics and Space Administration
+# (NASA).  All Rights Reserved.
+#
+# This software is distributed under the NASA Open Source Agreement
+# (NOSA), version 1.3.  The NOSA has been approved by the Open Source
+# Initiative.  See http://www.opensource.org/licenses/nasa1.3.php
+# for the complete NOSA document.
+#
+# THE SUBJECT SOFTWARE IS PROVIDED "AS IS" WITHOUT ANY WARRANTY OF ANY
+# KIND, EITHER EXPRESSED, IMPLIED, OR STATUTORY, INCLUDING, BUT NOT
+# LIMITED TO, ANY WARRANTY THAT THE SUBJECT SOFTWARE WILL CONFORM TO
+# SPECIFICATIONS, ANY IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+# A PARTICULAR PURPOSE, OR FREEDOM FROM INFRINGEMENT, ANY WARRANTY THAT
+# THE SUBJECT SOFTWARE WILL BE ERROR FREE, OR ANY WARRANTY THAT
+# DOCUMENTATION, IF PROVIDED, WILL CONFORM TO THE SUBJECT SOFTWARE. THIS
+# AGREEMENT DOES NOT, IN ANY MANNER, CONSTITUTE AN ENDORSEMENT BY
+# GOVERNMENT AGENCY OR ANY PRIOR RECIPIENT OF ANY RESULTS, RESULTING
+# DESIGNS, HARDWARE, SOFTWARE PRODUCTS OR ANY OTHER APPLICATIONS RESULTING
+# FROM USE OF THE SUBJECT SOFTWARE.  FURTHER, GOVERNMENT AGENCY DISCLAIMS
+# ALL WARRANTIES AND LIABILITIES REGARDING THIRD-PARTY SOFTWARE, IF
+# PRESENT IN THE ORIGINAL SOFTWARE, AND DISTRIBUTES IT "AS IS".
+#
+# RECIPIENT AGREES TO WAIVE ANY AND ALL CLAIMS AGAINST THE UNITED STATES
+# GOVERNMENT, ITS CONTRACTORS AND SUBCONTRACTORS, AS WELL AS ANY PRIOR
+# RECIPIENT.  IF RECIPIENT'S USE OF THE SUBJECT SOFTWARE RESULTS IN ANY
+# LIABILITIES, DEMANDS, DAMAGES, EXPENSES OR LOSSES ARISING FROM SUCH USE,
+# INCLUDING ANY DAMAGES FROM PRODUCTS BASED ON, OR RESULTING FROM,
+# RECIPIENT'S USE OF THE SUBJECT SOFTWARE, RECIPIENT SHALL INDEMNIFY AND
+# HOLD HARMLESS THE UNITED STATES GOVERNMENT, ITS CONTRACTORS AND
+# SUBCONTRACTORS, AS WELL AS ANY PRIOR RECIPIENT, TO THE EXTENT PERMITTED
+# BY LAW.  RECIPIENT'S SOLE REMEDY FOR ANY SUCH MATTER SHALL BE THE
+# IMMEDIATE, UNILATERAL TERMINATION OF THIS AGREEMENT.
+#
+
+use strict;
+use Cwd qw(abs_path cwd);
+use File::Basename;
+use Getopt::Long qw(:config bundling no_ignore_case require_order);
+require Mail::Sendmail;
+use POSIX;
+use Socket;
+use Sys::Hostname;
+use Sys::Syslog;
+require XML::TreePP;
+
+our $VERSION = 0.31;
+
+# add some basic paths
+$ENV{PATH} .= ($ENV{PATH} ? ":" : "") .
+    "/bin:/usr/bin:/usr/local/bin:/sbin:/usr/sbin:/usr/local/sbin";
+
+my $saverc = "/etc/saverc";
+
+# parse options
+my %opts = (
+    timeout => 2,
+);
+$opts{help} = 1 if (scalar(@ARGV) == 0);
+GetOptions(\%opts,
+    "after", "archive", "before", "cwd=s", "down", "file", "force", "give",
+    "heartbeat:i", "help", "remote", "shift+", "status", "sync", "sync-cmd",
+    "take", "timeout=i", "up", "validate",
+) or die "Invalid options\n";
+
+if ($opts{help}) {
+    my $base = basename($0);
+    print "Usage: $base [OPTION]... COMMAND\n";
+    print "\n";
+    print "Check failover status or execute COMMAND with associated\n";
+    print "synchronization, archival, and/or validation actions\n";
+    print "\n";
+    print "Options (defaults in brackets):\n";
+    print "    --after         perform after actions\n";
+    print "    --archive       perform archival actions\n";
+    print "    --before        perform before actions\n";
+    print "    --cwd=PATH      set working directory for commands to PATH\n";
+    print "    --down          bring node down\n";
+    print "    --file          indicate argument is file instead of command\n";
+    print "    --force         force actions even if file does not exist\n";
+    print "    --give          give up IP address\n";
+    print "    --heartbeat     send/monitor heartbeats\n";
+    print "    --help          help\n";
+    print "    --remote        indicate invocation was from remote action\n";
+    print "    --shift         shift arguments one or more times\n";
+    print "    --status        print current state\n";
+    print "    --sync          perform synchronization actions\n";
+    print "    --sync-cmd      execute command across all nodes\n";
+    print "    --take          take IP address\n";
+    print "    --timeout=SECS  set ssh connect timeout to SECS [$opts{timeout}]\n";
+    print "    --up            bring node up\n";
+    print "    --validate      perform validation actions\n";
+    exit;
+}
+
+my $treepp = XML::TreePP->new(force_array => [qw(file host)]);
+my $config = $treepp->parsefile($saverc)
+    or die "Invalid configuration file \"$saverc\"\n";
+$config = $config->{saverc};
+
+my $ssh = "ssh -aqx -oBatchMode=yes -oConnectTimeout=$opts{timeout}";
+my $user = getpwuid($<);
+if ($config->{keys}->{$user}) {
+    $ssh .= " -i " . $config->{keys}->{$user};
+}
+
+my $down_file = $config->{heartbeat}->{statedir} . "/save.down";
+my $down = -f $down_file ? 1 : 0;
+# initialize state
+state_rw("passive") if (!state_rw());
+my $rc = 0;
+
+if ($opts{down}) {
+    $down = 1;
+    open(FILE, '>', $down_file);
+    close FILE;
+    exit;
+} elsif ($opts{up}) {
+    $down = 0;
+    unlink $down_file;
+    # always come back up in passive state
+    state_rw("passive");
+} elsif (defined $opts{heartbeat} && $opts{remote}) {
+    heartbeat_remote();
+} elsif (defined $opts{heartbeat}) {
+    heartbeat_local();
+} elsif ($opts{give}) {
+    state_rw("give");
+    my $state = state_rw();
+    print STDERR "#### Save give ",
+        $state eq 'give' ? "success" : "failure", "\n";
+} elsif ($opts{take}) {
+    state_rw("take");
+    my $state = state_rw();
+    print STDERR "#### Save take ",
+        $state eq 'take' ? "success" : "failure", "\n";
+} elsif ($opts{status}) {
+    my $state = state_rw();
+    print $state, $down ? " (down)" : "", "\n";
+} else {
+    if (!$opts{archive} && !$opts{sync} && !$opts{validate} &&
+            !$opts{'sync-cmd'}) {
+        $opts{archive} = 1;
+        $opts{sync} = 1;
+        $opts{validate} = 1;
+    }
+    if (!$opts{after} && !$opts{before}) {
+        $opts{after} = 1;
+        $opts{before} = 1;
+    }
+    chdir $opts{cwd} if ($opts{cwd});
+
+    shift @ARGV while ($opts{'shift'}--);
+    my @args = @ARGV;
+
+    # command is first argument unless --file is specified
+    my $cmd;
+    if (!$opts{file}) {
+        $cmd = shift @args;
+        $cmd = fileparse($cmd);
+    }
+
+    # always do before case to store mtimes
+    save('before', @args) if (!$opts{'sync-cmd'});
+    $rc = 0;
+    if (!$opts{file}) {
+        $rc = system(@ARGV);
+        $rc = WEXITSTATUS($rc);
+        if (!$rc && $opts{'sync-cmd'} && !$opts{remote}) {
+            # execute command on all peers
+            my $cwd = abs_path(cwd);
+            foreach my $host (@{$config->{peers}->{host}}) {
+                my $action =
+                    "$ssh $host save --sync-cmd --remote --cwd=\"$cwd\" \"" .
+                    join('" "', @ARGV) . '"';
+                print STDERR "#### Save sync-cmd using $action\n";
+                system($action);
+                print STDERR "#### Save sync-cmd " .
+                    (!WEXITSTATUS($?) ?  "success" : "failure") . "\n";
+            }
+        }
+    }
+    save('after', @args) if ($opts{after} && !$opts{'sync-cmd'});
+}
+exit $rc;
+
+##################
+#### failover ####
+##################
+sub failover {
+    my $old_state = shift;
+    my $state = shift;
+
+    $opts{host} = fqdn(hostname);
+    my $hbconf = $config->{heartbeat};
+
+    require Net::ARP;
+    # compare actual and perceived state
+    my $force = 0;
+    if ($state eq $old_state) {
+        if ($hbconf->{address}) {
+            my $ips = qx(ip addr show dev $hbconf->{device});
+            if ($ips =~ /inet\s+\Q$hbconf->{address}\E/) {
+                if ($state =~ /passive/) {
+                    $force = 1;
+                    logit("state is $state, but failover IPv4 address found");
+                }
+            } else {
+                if ($state =~ /active/) {
+                    $force = 1;
+                    logit("state is $state, but failover IPv4 address not found");
+                }
+            }
+
+            # check failover mac is local mac if active
+            if (!$force && $state =~ /active/) {
+                my $mac = Net::ARP::get_mac($hbconf->{device});
+                require Net::Arping;
+                my $ap = Net::Arping->new;
+                my $apmac = $ap->arping(
+                    Host => $hbconf->{address}, Interface => $hbconf->{device});
+                if ($apmac && $mac ne $apmac) {
+                    $force = 1;
+                    logit("state is $state, but failover MAC address is $apmac");
+                }
+            }
+        }
+
+        if ($hbconf->{address6} ) {
+            my $ips = qx(ip addr show dev $hbconf->{device6});
+            if ($ips =~ /inet6\s+\Q$hbconf->{address6}\E/) {
+                if ($state =~ /passive/) {
+                    $force = 1;
+                    logit("state is $state, but failover IPv6 address found");
+                }
+            } else {
+                if ($state =~ /active/) {
+                    $force = 1;
+                    logit("state is $state, but failover IPv6 address not found");
+                }
+            }
+            #TODO: way to check ipv6 failover mac is local mac if active
+        }
+    } else {
+        $force = 1;
+        my $msg = "state transition from $old_state to $state" .
+            ($down ? " (down)" : "");
+        logit($msg);
+        if ($state =~ /active/ && !$down && $config->{log}->{email_failover}) {
+            my $fqdn = fqdn($hbconf->{address});
+            $fqdn = $hbconf->{address6} if (!$fqdn);
+            Mail::Sendmail::sendmail(
+                Smtp => 'localhost',
+                From => "root\@$opts{host}",
+                To => $config->{log}->{email_failover},
+                Subject => "Failover for alias $fqdn to host $opts{host}",
+                Message => $msg,
+            );
+        }
+        if ($state =~ /active/ && !$down && $config->{log}->{command_failover}) {
+            system($config->{log}->{command_failover}, $msg);
+        }
+    }
+
+    # make changes active
+    if ($force && $state =~ /active|passive/) {
+        my $op = "del";
+        if ($state =~ /active/) {
+            $op = "add";
+            my $mac = Net::ARP::get_mac($hbconf->{device});
+            for (1..5) {
+                if ($hbconf->{address}) {
+                    Net::ARP::send_packet($hbconf->{device}, $hbconf->{address},
+                        $hbconf->{address}, $mac, 'ff:ff:ff:ff:ff:ff', 'reply');
+                }
+                if ($hbconf->{address6}) {
+                    system("ndsend", $hbconf->{address6}, $hbconf->{device6});
+                }
+            }
+        }
+        if ($hbconf->{address}) {
+            system("ip addr $op " . $hbconf->{address} . "/" .
+                $hbconf->{prefix} .  " dev " . $hbconf->{device});
+        }
+        if ($hbconf->{address6}) {
+            system("ip -6 addr $op " . $hbconf->{address6} . "/" .
+                $hbconf->{prefix6} . " dev " . $hbconf->{device6});
+        }
+    }
+}
+
+##############
+#### fqdn ####
+##############
+# return fully qualified version of given host name
+sub fqdn {
+    my $host = shift;
+    if ($host =~ /^\d+\.\d+\.\d+\.\d+$/) {
+        my $name = gethostbyaddr(inet_aton($host), AF_INET);
+        return $name if ($name);
+    } else {
+        my @cols = gethostbyname($host);
+        return $cols[0] if ($cols[0]);
+    }
+    return $host;
+}
+
+########################
+#### hearbeat_local ####
+########################
+sub heartbeat_local {
+    return if ($down);
+
+    my $state = state_rw();
+    my $last = state_rw(-1);
+
+    if ($state ne 'active' && time - $last > $config->{heartbeat}->{timeout}) {
+        # peer has not responded so take over immediately
+        state_rw("active");
+        failover($state, "active");
+    }
+    if ($state ne 'passive') {
+        my $priority = $config->{heartbeat}->{priority};
+        my $extra = $state ne 'active' ? " --$state" : "";
+        foreach my $host (@{$config->{peers}->{host}}) {
+            system("$ssh $host save --heartbeat=$priority --remote$extra");
+        }
+    }
+    # make sure have address when active
+    failover($state, $state) if ($state eq 'active');
+}
+
+#########################
+#### hearbeat_remote ####
+#########################
+# process remote heartbeat invocation and change state appropriately
+sub heartbeat_remote {
+    # always update last remote time
+    state_rw(-1, time);
+    return if ($down);
+
+    my $priority = $config->{heartbeat}->{priority};
+    my $old_state = state_rw();
+    my $state;
+    if ($opts{take}) {
+        if ($old_state eq 'take' && $priority > $opts{heartbeat}) {
+            $state = "take";
+        } else {
+            $state = "give";
+        }
+    } elsif ($opts{give}) {
+        if ($old_state eq 'give' && $priority < $opts{heartbeat}) {
+            $state = "give";
+        } else {
+            $state = "active";
+        }
+    } else {
+        if ($old_state eq 'active' && $priority < $opts{heartbeat}) {
+            $state = "give";
+        } elsif ($old_state eq 'give' || $old_state eq 'passive') {
+            $state = "passive";
+        } else {
+            $state = "take";
+        }
+    }
+    state_rw($state) if ($state ne $old_state);
+    failover($old_state, $state);
+}
+
+###############
+#### logit ####
+###############
+sub logit {
+    my $msg = shift;
+    if ($config->{log}->{email}) {
+        Mail::Sendmail::sendmail(
+            Smtp => 'localhost',
+            From => "root\@$opts{host}",
+            To => $config->{log}->{email},
+            Subject => $msg,
+            Message => "",
+        );
+    }
+    if (exists $config->{log}->{syslog}) {
+        my $facility = $config->{syslog}->{facility};
+        $facility = 'user' if (!$facility);
+        openlog("save", 'pid', $facility);
+        my $priority = $config->{syslog}->{priority};
+        $priority = 'info' if (!$priority);
+        syslog($priority, $msg);
+        closelog();
+    }
+    if ($config->{log}->{command}) {
+        system($config->{log}->{command}, $msg);
+    }
+}
+
+##############
+#### save ####
+##############
+my %mtime;
+sub save {
+    my $time = shift;
+    my @args = @_;
+    my $stop = $rc;
+    foreach my $file (@args) {
+        last if ($file eq '--save_stop');
+        next if (!-f $file && !$opts{force});
+        my $abs = abs_path($file);
+        $file = $abs if ($abs);
+        my $dirname = dirname($file);
+        my $basename = basename($file);
+        my $mtime = (stat $file)[9];
+        if (!$mtime{$file}) {
+            $mtime{$file} = $mtime;
+        } else {
+            # skip files that are unchanged
+            next if (!$opts{file} && $mtime == $mtime{$file});
+        }
+        next if (!$opts{$time});
+        foreach my $cfile (@{$config->{files}->{file}}) {
+            my $path;
+            $path .= abs_path($cfile->{directory}) . "/"
+                if ($cfile->{directory});
+            $path .= $cfile->{name} if ($cfile->{name});
+            next if ($file !~ qr/$path/);
+            # do validate actions, then sync actions, then archive actions
+            foreach my $type (qw(validate sync archive)) {
+                next if (!$opts{$type});
+                my $msg = "#### Save $type-$time";
+                foreach my $cmd (keys(%{$cfile->{$time}})) {
+                    $cmd = "remote-$cmd" if ($type eq 'sync' && $opts{remote});
+                    next if ($stop || !$config->{$type}->{$cmd});
+                    foreach my $host (@{$config->{peers}->{host}}) {
+                        my $action = $config->{$type}->{$cmd};
+                        $action =~ s/\$basename/$basename/g;
+                        $action =~ s/\$dirname/$dirname/g;
+                        $action =~ s/\$file/$file/g;
+                        $action =~ s/\$host/$host/g;
+                        if ($type eq 'sync' && !$opts{remote}) {
+                            $action =~ s/\$ssh/$ssh $host save --file --force --remote --sync $file --save_stop/g;
+                        } else {
+                            $action =~ s/\$ssh/$ssh/g;
+                        }
+                        print STDERR "$msg using $action\n";
+                        system($action);
+                        $stop = $stop || WEXITSTATUS($?);
+                        print STDERR "$msg " . ($stop ? "failure" : "success") . "\n";
+                        if (!$stop && $type eq 'archive' && !$opts{remote}) {
+                            # sync archive
+                            $action = "$ssh $host save --file --force --remote --archive $file --save_stop";
+                            print STDERR "$msg using $action\n";
+                            system($action);
+                            $stop = $stop || WEXITSTATUS($?);
+                            print STDERR "$msg " .
+                                ($stop ? "failure" : "success") . "\n";
+                        }
+                        # only do validation locally
+                        last if ($type eq 'validate');
+                    }
+                }
+            }
+        }
+    }
+}
+
+##################
+#### state_rw ####
+##################
+sub state_rw {
+    my $state = shift;
+    my $base = "save";
+    if ($state == -1) {
+        # update last time
+        $state = shift;
+        $base = "last";
+    }
+    my $addr = $config->{heartbeat}->{address};
+    $addr = $config->{heartbeat}->{address6} if (!$addr);
+    my $state_file = $config->{heartbeat}->{statedir} . "/$base.$addr";
+    if ($state) {
+        logit("state set to $state" . ($down ? " (down)" : ""))
+            if ($base ne 'last');
+        unlink $state_file;
+        symlink($state, $state_file);
+    } else {
+        return readlink $state_file;
+    }
+}
+
+# This chunk of stuff was generated by App::FatPacker. To find the original
+# file's code, look for the end of this BEGIN block or the string 'FATPACK'
+BEGIN {
+my %fatpacked;
+
+$fatpacked{"Mail/Sendmail.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'MAIL_SENDMAIL';
+  package Mail::Sendmail;$VERSION='0.79';%mailcfg=('smtp'=>[qw(localhost) ],'from'=>'','mime'=>1,'retries'=>1,'delay'=>1,'tz'=>'','port'=>25,'debug'=>0);require Exporter;use strict;use vars qw($VERSION @ISA @EXPORT @EXPORT_OK %mailcfg $address_rx $debug $log $error $retry_delay $connect_retries);use Socket;use Time::Local;use Sys::Hostname;eval("use MIME::QuotedPrint");$mailcfg{'mime'}&&=(!$@);@ISA=qw(Exporter);@EXPORT=qw(&sendmail);@EXPORT_OK=qw(%mailcfg time_to_date $address_rx $debug $log $error);my$word_rx='[\x21\x23-\x27\x2A-\x2B\x2D\x2F\w\x3D\x3F]+';my$user_rx=$word_rx .'(?:\.' .$word_rx .')*' ;my$dom_rx='\w[-\w]*(?:\.\w[-\w]*)*';my$ip_rx='\[\d{1,3}(?:\.\d{1,3}){3}\]';$address_rx='((' .$user_rx .')\@(' .$dom_rx .'|' .$ip_rx .'))';;sub time_to_date {my$time=$_[0]|| time();my@months=qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);my@wdays=qw(Sun Mon Tue Wed Thu Fri Sat);my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime($time);my$TZ=$mailcfg{'tz'};if ($TZ eq ""){my$offset=sprintf "%.1f",(timegm(localtime)- time)/ 3600;my$minutes=sprintf "%02d",abs($offset - int($offset))* 60;$TZ=sprintf("%+03d",int($offset)).$minutes}return join(" ",($wdays[$wday].','),$mday,$months[$mon],$year+1900,sprintf("%02d:%02d:%02d",$hour,$min,$sec),$TZ)}sub sendmail {$error='';$log="Mail::Sendmail v. $VERSION - " .scalar(localtime())."\n";my$CRLF="\015\012";local $/=$CRLF;local $\='';local $_;my (%mail,$k,$smtp,$server,$port,$connected,$localhost,$fromaddr,$recip,@recipients,$to,$header,);sub fail {print STDERR @_ if $^W;$error .= join(" ",@_)."\n";close S;return 0}sub socket_write {my$i;for$i (0..$#_){my$data=ref($_[$i])? $_[$i]: \$_[$i];if ($mailcfg{'debug'}> 5){if (length($$data)< 500){print ">",$$data}else {print "> [...",length($$data)," bytes sent ...]\n"}}print(S $$data)|| return 0}1}sub socket_read {my$response;do {chomp($_=<S>);print "<$_\n" if$mailcfg{'debug'}> 5;if (/^[45]/ or!$_){return}$response .= $_}while (/^[\d]+-/);return$response}for$k (keys%mailcfg){if ($k =~ /[A-Z]/){$mailcfg{lc($k)}=$mailcfg{$k}}}while (@_){$k=shift @_;if (!$k and $^W){warn "Received false mail hash key: \'$k\'. Did you forget to put it in quotes?\n"}$k=ucfirst lc($k);$k =~ s/\s*:\s*$//o;$k =~ s/-(.)/"-" . uc($1)/ge;$mail{$k}=shift @_}$smtp=$mail{'Smtp'}|| $mail{'Server'};unshift @{$mailcfg{'smtp'}},$smtp if ($smtp and $mailcfg{'smtp'}->[0]ne $smtp);delete$mail{'Smtp'};delete$mail{'Server'};$mailcfg{'port'}=$mail{'Port'}|| $mailcfg{'port'}|| 25;delete$mail{'Port'};{local $^W=0;$mail{'Message'}=join("",$mail{'Message'},$mail{'Body'},$mail{'Text'})}delete$mail{'Body'};delete$mail{'Text'};$fromaddr=$mail{'Sender'}|| $mail{'From'}|| $mailcfg{'from'};delete$mail{'Sender'};unless ($fromaddr =~ /$address_rx/){return fail("Bad or missing From address: \'$fromaddr\'")}$fromaddr=$1;$mail{Date}||=time_to_date();$log .= "Date: $mail{Date}\n";$mail{'Message'}=~ s/\r\n/\n/go;$mail{'Mime-Version'}||='1.0';$mail{'Content-Type'}||='text/plain; charset="iso-8859-1"';unless ($mail{'Content-Transfer-Encoding'}|| $mail{'Content-Type'}=~ /multipart/io){if ($mailcfg{'mime'}){$mail{'Content-Transfer-Encoding'}='quoted-printable';$mail{'Message'}=encode_qp($mail{'Message'})}else {$mail{'Content-Transfer-Encoding'}='8bit';if ($mail{'Message'}=~ /[\x80-\xFF]/o){$error .= "MIME::QuotedPrint not present!\nSending 8bit characters, hoping it will come across OK.\n";warn "MIME::QuotedPrint not present!\n","Sending 8bit characters without encoding, hoping it will come across OK.\n" if $^W}}}$mail{'Message'}=~ s/^\./\.\./gom;$mail{'Message'}=~ s/\n/$CRLF/go;{local $^W=0;$recip=join(", ",$mail{To},$mail{Cc},$mail{Bcc})}delete$mail{'Bcc'};@recipients=();while ($recip =~ /$address_rx/go){push@recipients,$1}unless (@recipients){return fail("No recipient!")}$localhost=hostname()|| 'localhost';for$server (@{$mailcfg{'smtp'}}){unless (socket S,AF_INET,SOCK_STREAM,scalar(getprotobyname 'tcp')){return fail("socket failed ($!)")}print "- trying $server\n" if$mailcfg{'debug'}> 1;$server =~ s/\s+//go;$port=($server =~ s/:(\d+)$//o)? $1 : $mailcfg{'port'};$smtp=$server;my$smtpaddr=inet_aton$server;unless ($smtpaddr){$error .= "$server not found\n";next}my$retried=0;while ((not $connected=connect S,pack_sockaddr_in($port,$smtpaddr))and ($retried < $mailcfg{'retries'})){$retried++;$error .= "connect to $server failed ($!)\n";print "- connect to $server failed ($!)\n" if$mailcfg{'debug'}> 1;print "retrying in $mailcfg{'delay'} seconds...\n" if$mailcfg{'debug'}> 1;sleep$mailcfg{'delay'}}if ($connected){print "- connected to $server\n" if$mailcfg{'debug'}> 3;last}else {$error .= "connect to $server failed\n";print "- connect to $server failed, next server...\n" if$mailcfg{'debug'}> 1;next}}unless ($connected){return fail("connect to $smtp failed ($!) no (more) retries!")};{local $^W=0;$log .= "Server: $smtp Port: $port\n" ."From: $fromaddr\n" ."Subject: $mail{Subject}\n" ."To: "}my($oldfh)=select(S);$|=1;select($oldfh);socket_read()|| return fail("Connection error from $smtp on port $port ($_)");socket_write("HELO $localhost$CRLF")|| return fail("send HELO error");socket_read()|| return fail("HELO error ($_)");socket_write("MAIL FROM: <$fromaddr>$CRLF")|| return fail("send MAIL FROM: error");socket_read()|| return fail("MAIL FROM: error ($_)");for$to (@recipients){socket_write("RCPT TO: <$to>$CRLF")|| return fail("send RCPT TO: error");socket_read()|| return fail("RCPT TO: error ($_)");$log .= "$to\n    "}socket_write("DATA$CRLF")|| return fail("send DATA error");socket_read()|| return fail("DATA error ($_)");for$header (keys%mail){next if$header eq "Message";$mail{$header}=~ s/\s+$//o;socket_write("$header: $mail{$header}$CRLF")|| return fail("send $header: error")};socket_write($CRLF,\$mail{'Message'},"$CRLF.$CRLF")|| return fail("send message error");socket_read()|| return fail("message transmission error ($_)");$log .= "\nResult: $_";socket_write("QUIT$CRLF")|| return fail("send QUIT error");socket_read();close S;return 1}1;
+MAIL_SENDMAIL
+
+$fatpacked{"XML/TreePP.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'XML_TREEPP';
+  package XML::TreePP;use strict;use Carp;use Symbol;use vars qw($VERSION);$VERSION='0.43';my$XML_ENCODING='UTF-8';my$INTERNAL_ENCODING='UTF-8';my$USER_AGENT='XML-TreePP/'.$VERSION.' ';my$ATTR_PREFIX='-';my$TEXT_NODE_KEY='#text';my$USE_ENCODE_PM=($] >= 5.008);my$ALLOW_UTF8_FLAG=($] >= 5.008001);my$EMPTY_ELEMENT_TAG_END=' />';sub new {my$package=shift;my$self={@_};bless$self,$package;$self}sub die {my$self=shift;my$mess=shift;return if$self->{ignore_error};Carp::croak$mess}sub warn {my$self=shift;my$mess=shift;return if$self->{ignore_error};Carp::carp$mess}sub set {my$self=shift;my$key=shift;my$val=shift;if (defined$val){$self->{$key}=$val}else {delete$self->{$key}}}sub get {my$self=shift;my$key=shift;$self->{$key}if exists$self->{$key}}sub writefile {my$self=shift;my$file=shift;my$tree=shift or return$self->die('Invalid tree');my$encode=shift;return$self->die('Invalid filename')unless defined$file;my$text=$self->write($tree,$encode);if ($ALLOW_UTF8_FLAG && utf8::is_utf8($text)){utf8::encode($text)}$self->write_raw_xml($file,$text)}sub write {my$self=shift;my$tree=shift or return$self->die('Invalid tree');my$from=$self->{internal_encoding}|| $INTERNAL_ENCODING;my$to=shift || $self->{output_encoding}|| $XML_ENCODING;my$decl=$self->{xml_decl};$decl='<?xml version="1.0" encoding="' .$to .'" ?>' unless defined$decl;local$self->{__first_out};if (exists$self->{first_out}){my$keys=$self->{first_out};$keys=[$keys]unless ref$keys;$self->{__first_out}={map {$keys->[$_]=>$_}0 .. $#$keys }}local$self->{__last_out};if (exists$self->{last_out}){my$keys=$self->{last_out};$keys=[$keys]unless ref$keys;$self->{__last_out}={map {$keys->[$_]=>$_}0 .. $#$keys }}my$tnk=$self->{text_node_key}if exists$self->{text_node_key};$tnk=$TEXT_NODE_KEY unless defined$tnk;local$self->{text_node_key}=$tnk;my$apre=$self->{attr_prefix}if exists$self->{attr_prefix};$apre=$ATTR_PREFIX unless defined$apre;local$self->{__attr_prefix_len}=length($apre);local$self->{__attr_prefix_rex}=$apre;local$self->{__indent};if (exists$self->{indent}&& $self->{indent}){$self->{__indent}=' ' x $self->{indent}}if (!UNIVERSAL::isa($tree,'HASH')){return$self->die('Invalid tree')}my$text=$self->hash_to_xml(undef,$tree);if ($from && $to){my$stat=$self->encode_from_to(\$text,$from,$to);return$self->die("Unsupported encoding: $to")unless$stat}return$text if ($decl eq '');join("\n",$decl,$text)}sub parsehttp {my$self=shift;local$self->{__user_agent};if (exists$self->{user_agent}){my$agent=$self->{user_agent};$agent .= $USER_AGENT if ($agent =~ /\s$/s);$self->{__user_agent}=$agent if ($agent ne '')}else {$self->{__user_agent}=$USER_AGENT}my$http=$self->{__http_module};unless ($http){$http=$self->find_http_module(@_);$self->{__http_module}=$http}if ($http eq 'LWP::UserAgent'){return$self->parsehttp_lwp(@_)}elsif ($http eq 'HTTP::Lite'){return$self->parsehttp_lite(@_)}else {return$self->die("LWP::UserAgent or HTTP::Lite is required: $_[1]")}}sub find_http_module {my$self=shift || {};if (exists$self->{lwp_useragent}&& ref$self->{lwp_useragent}){return 'LWP::UserAgent' if defined$LWP::UserAgent::VERSION;return 'LWP::UserAgent' if&load_lwp_useragent();return$self->die("LWP::UserAgent is required: $_[1]")}if (exists$self->{http_lite}&& ref$self->{http_lite}){return 'HTTP::Lite' if defined$HTTP::Lite::VERSION;return 'HTTP::Lite' if&load_http_lite();return$self->die("HTTP::Lite is required: $_[1]")}return 'LWP::UserAgent' if defined$LWP::UserAgent::VERSION;return 'HTTP::Lite' if defined$HTTP::Lite::VERSION;return 'LWP::UserAgent' if&load_lwp_useragent();return 'HTTP::Lite' if&load_http_lite();return$self->die("LWP::UserAgent or HTTP::Lite is required: $_[1]")}sub load_lwp_useragent {return$LWP::UserAgent::VERSION if defined$LWP::UserAgent::VERSION;local $@;eval {require LWP::UserAgent};$LWP::UserAgent::VERSION}sub load_http_lite {return$HTTP::Lite::VERSION if defined$HTTP::Lite::VERSION;local $@;eval {require HTTP::Lite};$HTTP::Lite::VERSION}sub load_tie_ixhash {return$Tie::IxHash::VERSION if defined$Tie::IxHash::VERSION;local $@;eval {require Tie::IxHash};$Tie::IxHash::VERSION}sub parsehttp_lwp {my$self=shift;my$method=shift or return$self->die('Invalid HTTP method');my$url=shift or return$self->die('Invalid URL');my$body=shift;my$header=shift;my$ua=$self->{lwp_useragent}if exists$self->{lwp_useragent};if (!ref$ua){$ua=LWP::UserAgent->new();$ua->env_proxy();$ua->agent($self->{__user_agent})if defined$self->{__user_agent}}else {$ua->agent($self->{__user_agent})if exists$self->{user_agent}}my$req=HTTP::Request->new($method,$url);my$ct=0;if (ref$header){for my$field (sort keys %$header){my$value=$header->{$field};$req->header($field=>$value);$ct ++ if ($field =~ /^Content-Type$/i)}}if (defined$body &&!$ct){$req->header('Content-Type'=>'application/x-www-form-urlencoded')}$req->add_content_utf8($body)if defined$body;my$res=$ua->request($req);my$code=$res->code();my$text;if ($res->can('decoded_content')){$text=$res->decoded_content(charset=>'none')}else {$text=$res->content()}my$tree=$self->parse(\$text)if$res->is_success();wantarray ? ($tree,$text,$code): $tree}sub parsehttp_lite {my$self=shift;my$method=shift or return$self->die('Invalid HTTP method');my$url=shift or return$self->die('Invalid URL');my$body=shift;my$header=shift;my$http=HTTP::Lite->new();$http->method($method);my$ua=0;if (ref$header){for my$field (sort keys %$header){my$value=$header->{$field};$http->add_req_header($field,$value);$ua ++ if ($field =~ /^User-Agent$/i)}}if (defined$self->{__user_agent}&&!$ua){$http->add_req_header('User-Agent',$self->{__user_agent})}$http->{content}=$body if defined$body;my$code=$http->request($url)or return;my$text=$http->body();my$tree=$self->parse(\$text);wantarray ? ($tree,$text,$code): $tree}sub parsefile {my$self=shift;my$file=shift;return$self->die('Invalid filename')unless defined$file;my$text=$self->read_raw_xml($file);$self->parse(\$text)}sub parse {my$self=shift;my$text=ref $_[0]? ${$_[0]}: $_[0];return$self->die('Null XML source')unless defined$text;my$from=&xml_decl_encoding(\$text)|| $XML_ENCODING;my$to=$self->{internal_encoding}|| $INTERNAL_ENCODING;if ($from && $to){my$stat=$self->encode_from_to(\$text,$from,$to);return$self->die("Unsupported encoding: $from")unless$stat}local$self->{__force_array};local$self->{__force_array_all};if (exists$self->{force_array}){my$force=$self->{force_array};$force=[$force]unless ref$force;$self->{__force_array}={map {$_=>1}@$force };$self->{__force_array_all}=$self->{__force_array}->{'*'}}local$self->{__force_hash};local$self->{__force_hash_all};if (exists$self->{force_hash}){my$force=$self->{force_hash};$force=[$force]unless ref$force;$self->{__force_hash}={map {$_=>1}@$force };$self->{__force_hash_all}=$self->{__force_hash}->{'*'}}my$tnk=$self->{text_node_key}if exists$self->{text_node_key};$tnk=$TEXT_NODE_KEY unless defined$tnk;local$self->{text_node_key}=$tnk;my$apre=$self->{attr_prefix}if exists$self->{attr_prefix};$apre=$ATTR_PREFIX unless defined$apre;local$self->{attr_prefix}=$apre;if (exists$self->{use_ixhash}&& $self->{use_ixhash}){return$self->die("Tie::IxHash is required.")unless&load_tie_ixhash()}if (exists$self->{require_xml_decl}&& $self->{require_xml_decl}){return$self->die("XML declaration not found")unless looks_like_xml(\$text)}my$flat=$self->xml_to_flat(\$text);my$class=$self->{base_class}if exists$self->{base_class};my$tree=$self->flat_to_tree($flat,'',$class);if (ref$tree){if (defined$class){bless($tree,$class)}elsif (exists$self->{elem_class}&& $self->{elem_class}){bless($tree,$self->{elem_class})}}wantarray ? ($tree,$text): $tree}sub xml_to_flat {my$self=shift;my$textref=shift;my$flat=[];my$prefix=$self->{attr_prefix};my$ixhash=(exists$self->{use_ixhash}&& $self->{use_ixhash});my$deref=\&xml_unescape;my$xml_deref=(exists$self->{xml_deref}&& $self->{xml_deref});if ($xml_deref){if ((exists$self->{utf8_flag}&& $self->{utf8_flag})|| ($ALLOW_UTF8_FLAG && utf8::is_utf8($$textref))){$deref=\&xml_deref_string}else {$deref=\&xml_deref_octet}}while ($$textref =~ m{
+          ([^<]*) <
+          ((
+              \? ([^<>]*) \?
+          )|(
+              \!\[CDATA\[(.*?)\]\]
+          )|(
+              \!DOCTYPE\s+([^\[\]<>]*(?:\[.*?\]\s*)?)
+          )|(
+              \!--(.*?)--
+          )|(
+              ([^\!\?\s<>](?:"[^"]*"|'[^']*'|[^"'<>])*)
+          ))
+          > ([^<]*)
+      }sxg){my ($ahead,$match,$typePI,$contPI,$typeCDATA,$contCDATA,$typeDocT,$contDocT,$typeCmnt,$contCmnt,$typeElem,$contElem,$follow)=($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13);if (defined$ahead && $ahead =~ /\S/){$ahead =~ s/([^\040-\076])/sprintf("\\x%02X",ord($1))/eg;$self->warn("Invalid string: [$ahead] before <$match>")}if ($typeElem){my$node={};if ($contElem =~ s#^/##){$node->{endTag}++}elsif ($contElem =~ s#/$##){$node->{emptyTag}++}else {$node->{startTag}++}$node->{tagName}=$1 if ($contElem =~ s#^(\S+)\s*##);unless ($node->{endTag}){my$attr;while ($contElem =~ m{
+                      ([^\s\=\"\']+)\s*=\s*(?:(")(.*?)"|'(.*?)')
+                  }sxg){my$key=$1;my$val=&$deref($2 ? $3 : $4);if (!ref$attr){$attr={};tie(%$attr,'Tie::IxHash')if$ixhash}$attr->{$prefix.$key}=$val}$node->{attributes}=$attr if ref$attr}push(@$flat,$node)}elsif ($typeCDATA){if (exists$self->{cdata_scalar_ref}&& $self->{cdata_scalar_ref}){push(@$flat,\$contCDATA)}else {push(@$flat,$contCDATA)}}elsif ($typeCmnt){}elsif ($typeDocT){}elsif ($typePI){}else {$self->warn("Invalid Tag: <$match>")}if ($follow =~ /\S/){my$val=&$deref($follow);push(@$flat,$val)}}$flat}sub flat_to_tree {my$self=shift;my$source=shift;my$parent=shift;my$class=shift;my$tree={};my$text=[];if (exists$self->{use_ixhash}&& $self->{use_ixhash}){tie(%$tree,'Tie::IxHash')}while (scalar @$source){my$node=shift @$source;if (!ref$node || UNIVERSAL::isa($node,"SCALAR")){push(@$text,$node);next}my$name=$node->{tagName};if ($node->{endTag}){last if ($parent eq $name);return$self->die("Invalid tag sequence: <$parent></$name>")}my$elem=$node->{attributes};my$forcehash=$self->{__force_hash_all}|| $self->{__force_hash}->{$name};my$subclass;if (defined$class){my$escname=$name;$escname =~ s/\W/_/sg;$subclass=$class.'::'.$escname}if ($node->{startTag}){my$child=$self->flat_to_tree($source,$name,$subclass);next unless defined$child;my$hasattr=scalar keys %$elem if ref$elem;if (UNIVERSAL::isa($child,"HASH")){if ($hasattr){%$elem=(%$elem,%$child)}else {$elem=$child}}else {if ($hasattr){$elem->{$self->{text_node_key}}=$child}elsif ($forcehash){$elem={$self->{text_node_key}=>$child }}else {$elem=$child}}}elsif ($forcehash &&!ref$elem){$elem={}}if (ref$elem && UNIVERSAL::isa($elem,"HASH")){if (defined$subclass){bless($elem,$subclass)}elsif (exists$self->{elem_class}&& $self->{elem_class}){my$escname=$name;$escname =~ s/\W/_/sg;my$elmclass=$self->{elem_class}.'::'.$escname;bless($elem,$elmclass)}}$tree->{$name}||=[];push(@{$tree->{$name}},$elem)}if (!$self->{__force_array_all}){for my$key (keys %$tree){next if$self->{__force_array}->{$key};next if (1 < scalar @{$tree->{$key}});$tree->{$key}=shift @{$tree->{$key}}}}my$haschild=scalar keys %$tree;if (scalar @$text){if (scalar @$text==1){$text=shift @$text}elsif (!scalar grep {ref $_}@$text){$text=join('',@$text)}else {my$join=join('',map {ref $_ ? $$_ : $_}@$text);$text=\$join}if ($haschild){$tree->{$self->{text_node_key}}=$text}else {$tree=$text}}elsif (!$haschild){$tree=""}$tree}sub hash_to_xml {my$self=shift;my$name=shift;my$hash=shift;my$out=[];my$attr=[];my$allkeys=[keys %$hash ];my$fo=$self->{__first_out}if ref$self->{__first_out};my$lo=$self->{__last_out}if ref$self->{__last_out};my$firstkeys=[sort {$fo->{$a}<=> $fo->{$b}}grep {exists$fo->{$_}}@$allkeys ]if ref$fo;my$lastkeys=[sort {$lo->{$a}<=> $lo->{$b}}grep {exists$lo->{$_}}@$allkeys ]if ref$lo;$allkeys=[grep {!exists$fo->{$_}}@$allkeys ]if ref$fo;$allkeys=[grep {!exists$lo->{$_}}@$allkeys ]if ref$lo;unless (exists$self->{use_ixhash}&& $self->{use_ixhash}){$allkeys=[sort @$allkeys ]}my$prelen=$self->{__attr_prefix_len};my$pregex=$self->{__attr_prefix_rex};my$textnk=$self->{text_node_key};my$tagend=$self->{empty_element_tag_end}|| $EMPTY_ELEMENT_TAG_END;for my$keys ($firstkeys,$allkeys,$lastkeys){next unless ref$keys;my$elemkey=$prelen ? [grep {substr($_,0,$prelen)ne $pregex}@$keys ]: $keys;my$attrkey=$prelen ? [grep {substr($_,0,$prelen)eq $pregex}@$keys ]: [];for my$key (@$elemkey){my$val=$hash->{$key};if (!defined$val){next if ($key eq $textnk);push(@$out,"<$key$tagend")}elsif (UNIVERSAL::isa($val,'HASH')){my$child=$self->hash_to_xml($key,$val);push(@$out,$child)}elsif (UNIVERSAL::isa($val,'ARRAY')){my$child=$self->array_to_xml($key,$val);push(@$out,$child)}elsif (UNIVERSAL::isa($val,'SCALAR')){my$child=$self->scalaref_to_cdata($key,$val);push(@$out,$child)}else {my$ref=ref$val;$self->warn("Unsupported reference type: $ref in $key")if$ref;my$child=$self->scalar_to_xml($key,$val);push(@$out,$child)}}for my$key (@$attrkey){my$name=substr($key,$prelen);my$val=&xml_escape($hash->{$key});push(@$attr,' ' .$name .'="' .$val .'"')}}my$jattr=join('',@$attr);if (defined$name && scalar @$out &&!grep {!/^</s}@$out){if (defined$self->{__indent}){s/^(\s*<)/$self->{__indent}$1/mg foreach @$out}unshift(@$out,"\n")}my$text=join('',@$out);if (defined$name){if (scalar @$out){$text="<$name$jattr>$text</$name>\n"}else {$text="<$name$jattr$tagend\n"}}$text}sub array_to_xml {my$self=shift;my$name=shift;my$array=shift;my$out=[];my$tagend=$self->{empty_element_tag_end}|| $EMPTY_ELEMENT_TAG_END;for my$val (@$array){if (!defined$val){push(@$out,"<$name$tagend\n")}elsif (UNIVERSAL::isa($val,'HASH')){my$child=$self->hash_to_xml($name,$val);push(@$out,$child)}elsif (UNIVERSAL::isa($val,'ARRAY')){my$child=$self->array_to_xml($name,$val);push(@$out,$child)}elsif (UNIVERSAL::isa($val,'SCALAR')){my$child=$self->scalaref_to_cdata($name,$val);push(@$out,$child)}else {my$ref=ref$val;$self->warn("Unsupported reference type: $ref in $name")if$ref;my$child=$self->scalar_to_xml($name,$val);push(@$out,$child)}}my$text=join('',@$out);$text}sub scalaref_to_cdata {my$self=shift;my$name=shift;my$ref=shift;my$data=defined $$ref ? $$ref : '';$data =~ s#(]])(>)#$1]]><![CDATA[$2#g;my$text='<![CDATA[' .$data .']]>';$text="<$name>$text</$name>\n" if ($name ne $self->{text_node_key});$text}sub scalar_to_xml {my$self=shift;my$name=shift;my$scalar=shift;my$copy=$scalar;my$text=&xml_escape($copy);$text="<$name>$text</$name>\n" if ($name ne $self->{text_node_key});$text}sub write_raw_xml {my$self=shift;my$file=shift;my$fh=Symbol::gensym();open($fh,">$file")or return$self->die("$! - $file");print$fh @_;close($fh)}sub read_raw_xml {my$self=shift;my$file=shift;my$fh=Symbol::gensym();open($fh,$file)or return$self->die("$! - $file");local $/=undef;my$text=<$fh>;close($fh);$text}sub looks_like_xml {my$textref=shift;my$args=($$textref =~ /^(?:\s*\xEF\xBB\xBF)?\s*<\?xml(\s+\S.*)\?>/s)[0];if (!$args){return}return$args}sub xml_decl_encoding {my$textref=shift;return unless defined $$textref;my$args=looks_like_xml($textref)or return;my$getcode=($args =~ /\s+encoding=(".*?"|'.*?')/)[0]or return;$getcode =~ s/^['"]//;$getcode =~ s/['"]$//;$getcode}sub encode_from_to {my$self=shift;my$txtref=shift or return;my$from=shift or return;my$to=shift or return;unless (defined$Encode::EUCJPMS::VERSION){$from='EUC-JP' if ($from =~ /\beuc-?jp-?(win|ms)$/i);$to='EUC-JP' if ($to =~ /\beuc-?jp-?(win|ms)$/i)}my$RE_IS_UTF8=qr/^utf-?8$/i;if ($from =~ $RE_IS_UTF8){$$txtref =~ s/^\xEF\xBB\xBF//s}my$setflag=$self->{utf8_flag}if exists$self->{utf8_flag};if (!$ALLOW_UTF8_FLAG && $setflag){return$self->die("Perl 5.8.1 is required for utf8_flag: $]")}if ($USE_ENCODE_PM){&load_encode();my$encver=($Encode::VERSION =~ /^([\d\.]+)/)[0];my$check=($encver < 2.13)? 0x400 : Encode::FB_XMLCREF();my$encfrom=Encode::find_encoding($from)if$from;return$self->die("Unknown encoding: $from")unless ref$encfrom;my$encto=Encode::find_encoding($to)if$to;return$self->die("Unknown encoding: $to")unless ref$encto;if ($ALLOW_UTF8_FLAG && utf8::is_utf8($$txtref)){if ($to =~ $RE_IS_UTF8){}else {$$txtref=$encto->encode($$txtref,$check)}}else {$$txtref=$encfrom->decode($$txtref);if ($to =~ $RE_IS_UTF8 && $setflag){}else {$$txtref=$encto->encode($$txtref,$check)}}}elsif ((uc($from)eq 'ISO-8859-1' || uc($from)eq 'US-ASCII' || uc($from)eq 'LATIN-1')&& uc($to)eq 'UTF-8'){&latin1_to_utf8($txtref)}else {my$jfrom=&get_jcode_name($from);my$jto=&get_jcode_name($to);return$to if (uc($jfrom)eq uc($jto));if ($jfrom && $jto){&load_jcode();if (defined$Jcode::VERSION){Jcode::convert($txtref,$jto,$jfrom)}else {return$self->die("Jcode.pm is required: $from to $to")}}else {return$self->die("Encode.pm is required: $from to $to")}}$to}sub load_jcode {return if defined$Jcode::VERSION;local $@;eval {require Jcode}}sub load_encode {return if defined$Encode::VERSION;local $@;eval {require Encode}}sub latin1_to_utf8 {my$strref=shift;$$strref =~ s{
+          ([\x80-\xFF])
+      }{
+          pack( 'C2' => 0xC0|(ord($1)>>6),0x80|(ord($1)&0x3F) )
+      }exg}sub get_jcode_name {my$src=shift;my$dst;if ($src =~ /^utf-?8$/i){$dst='utf8'}elsif ($src =~ /^euc.*jp(-?(win|ms))?$/i){$dst='euc'}elsif ($src =~ /^(shift.*jis|cp932|windows-31j)$/i){$dst='sjis'}elsif ($src =~ /^iso-2022-jp/){$dst='jis'}$dst}sub xml_escape {my$str=shift;return '' unless defined$str;$str =~ s{
+          ([\x00-\x08\x0B\x0C\x0E-\x1F\x7F])
+      }{
+          sprintf( '&#%d;', ord($1) );
+      }gex;$str =~ s/&(?!#(\d+;|x[\dA-Fa-f]+;))/&amp;/g;$str =~ s/</&lt;/g;$str =~ s/>/&gt;/g;$str =~ s/'/&apos;/g;$str =~ s/"/&quot;/g;$str}sub xml_unescape {my$str=shift;my$map={qw(quot " lt < gt > apos ' amp &)};$str =~ s{
+          (&(?:\#(\d{1,3})|\#x([0-9a-fA-F]{1,2})|(quot|lt|gt|apos|amp));)
+      }{
+          $4 ? $map->{$4} : &code_to_ascii( $3 ? hex($3) : $2, $1 );
+      }gex;$str}sub xml_deref_octet {my$str=shift;my$map={qw(quot " lt < gt > apos ' amp &)};$str =~ s{
+          (&(?:\#(\d{1,7})|\#x([0-9a-fA-F]{1,6})|(quot|lt|gt|apos|amp));)
+      }{
+          $4 ? $map->{$4} : &code_to_utf8( $3 ? hex($3) : $2, $1 );
+      }gex;$str}sub xml_deref_string {my$str=shift;my$map={qw(quot " lt < gt > apos ' amp &)};$str =~ s{
+          (&(?:\#(\d{1,7})|\#x([0-9a-fA-F]{1,6})|(quot|lt|gt|apos|amp));)
+      }{
+          $4 ? $map->{$4} : pack( U => $3 ? hex($3) : $2 );
+      }gex;$str}sub code_to_ascii {my$code=shift;if ($code <= 0x007F){return pack(C=>$code)}return shift if scalar @_;sprintf('&#%d;',$code)}sub code_to_utf8 {my$code=shift;if ($code <= 0x007F){return pack(C=>$code)}elsif ($code <= 0x07FF){return pack(C2=>0xC0|($code>>6),0x80|($code&0x3F))}elsif ($code <= 0xFFFF){return pack(C3=>0xE0|($code>>12),0x80|(($code>>6)&0x3F),0x80|($code&0x3F))}elsif ($code <= 0x10FFFF){return pack(C4=>0xF0|($code>>18),0x80|(($code>>12)&0x3F),0x80|(($code>>6)&0x3F),0x80|($code&0x3F))}return shift if scalar @_;sprintf('&#x%04X;',$code)}1;
+XML_TREEPP
+
+s/^  //mg for values %fatpacked;
+
+my $class = 'FatPacked::'.(0+\%fatpacked);
+no strict 'refs';
+*{"${class}::files"} = sub { keys %{$_[0]} };
+
+if ($] < 5.008) {
+  *{"${class}::INC"} = sub {
+     if (my $fat = $_[0]{$_[1]}) {
+       return sub {
+         return 0 unless length $fat;
+         $fat =~ s/^([^\n]*\n?)//;
+         $_ = $1;
+         return 1;
+       };
+     }
+     return;
+  };
+}
+
+else {
+  *{"${class}::INC"} = sub {
+    if (my $fat = $_[0]{$_[1]}) {
+      open my $fh, '<', \$fat
+        or die "FatPacker error loading $_[1] (could be a perl installation issue?)";
+      return $fh;
+    }
+    return;
+  };
+}
+
+unshift @INC, bless \%fatpacked, $class;
+  } # END OF FATPACK CODE
+

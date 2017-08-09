@@ -1,9 +1,0 @@
-# sample Mon authorization file
-
-# this section may be commented out when using ssh heartbeats
-
-trap section
-
-host2 * *
-host2-priv * *
-
