@@ -150,6 +150,6 @@ Save Installation and Configuration
     For example, to send/monitor heartbeats once a minute, add the
     following root crontab:
 
-    	# send/monitor high availability heartbeat every minute
-		* * * * * /usr/local/bin/save --heartbeat --timeout=10 >/dev/null 2>&1
+        # send/monitor high availability heartbeat every minute
+        * * * * * /usr/local/bin/save --heartbeat --timeout=10 >/dev/null 2>&1
 
