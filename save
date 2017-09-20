@@ -46,7 +46,7 @@ use Sys::Hostname;
 use Sys::Syslog;
 require XML::TreePP;
 
-our $VERSION = 0.31;
+our $VERSION = 0.32;
 
 # add some basic paths
 $ENV{PATH} .= ($ENV{PATH} ? ":" : "") .
@@ -483,8 +483,10 @@ sub state_rw {
     if ($state) {
         logit("state set to $state" . ($down ? " (down)" : ""))
             if ($base ne 'last');
-        unlink $state_file;
-        symlink($state, $state_file);
+        # use tmp file so can be updated atomically
+        unlink "$state_file.tmp";
+        symlink($state, "$state_file.tmp");
+        rename("$state_file.tmp", $state_file);
     } else {
         return readlink $state_file;
     }
