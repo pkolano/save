@@ -37,6 +37,11 @@ specific actions defined within the Save configuration, the "save"
 command has no effect, which allows the administrator to safely prepend
 this to any command.
 
+Save is in active production at the NASA Advanced Supercomputing
+Facility and has been ensuring the high availability of the Secure
+Unattended Proxy (https://www.nas.nasa.gov/hecc/support/kb/entry/145)
+system since Sept. 2007.
+
 For installation details, see "INSTALL".  For details of usage and
 configuration, see "doc/save.1" and "doc/saverc.5" (via man once
 installed or via "nroff -man"), respectively.
