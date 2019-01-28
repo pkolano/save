@@ -17,12 +17,15 @@ CHANGES
     - Changed syslog config element to be under new log element 
     - Changed prerequisite Perl to version 5.7.3
 
-* Save 2.0 (8/9/17)
+* Save 2.0 (08/9/17)
     - Added non-XS module dependencies via App::FatPacker
     - Changed docs to man page format
     - Changed --sync_cmd option to --sync-cmd
     - Removed dependence on/integration with Mon and Mon-based alerts/monitors
         (remain on version 1.1 if this functionality is still desired)
 
-* Save 2.1 (9/20/17)
+* Save 2.1 (09/20/17)
     - Fixed inadvertent failovers due to non-atomic state updates
+
+* Save 2.2 (01/28/19)
+    - Fixed immediate retake after --give due to inaccurate remote timestamp

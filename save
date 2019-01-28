@@ -46,7 +46,7 @@ use Sys::Hostname;
 use Sys::Syslog;
 require XML::TreePP;
 
-our $VERSION = 0.32;
+our $VERSION = 0.33;
 
 # add some basic paths
 $ENV{PATH} .= ($ENV{PATH} ? ":" : "") .
@@ -129,6 +129,8 @@ if ($opts{down}) {
 } elsif ($opts{give}) {
     state_rw("give");
     my $state = state_rw();
+    # last remote time may be very old or non-existent
+    state_rw(-1, time);
     print STDERR "#### Save give ",
         $state eq 'give' ? "success" : "failure", "\n";
 } elsif ($opts{take}) {

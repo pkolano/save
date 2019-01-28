@@ -20,9 +20,9 @@ Save Installation and Configuration
     Optionally, copy the man page files to the appropriate man
     directories.  For example:
 
-        cp save /usr/local/bin
-        cp doc/save.1 /usr/local/man/man1
-        cp doc/saverc.5 /usr/local/man/man5
+        install -m 755 save /usr/local/bin/
+        install -m 644 doc/save.1 /usr/local/man/man1/
+        install -m 644 doc/saverc.5 /usr/local/man/man5/
 
     would install the executable to /usr/local/bin and the man pages
     to /usr/local/man.  It will be assumed that the man pages are
@@ -147,9 +147,11 @@ Save Installation and Configuration
 
     The Save heartbeat mechanism must be manually configured to run
     periodically via cron or similar mechanism such as systemd timers.
-    For example, to send/monitor heartbeats once a minute, add the
-    following root crontab:
+    For example, to send/monitor heartbeats once a minute and reset
+    the state after reboots, add the following root crontab:
 
         # send/monitor high availability heartbeat every minute
         * * * * * /usr/local/bin/save --heartbeat --timeout=10 >/dev/null 2>&1
 
+        # ensure system does not come up as active
+        @reboot /usr/local/bin/save --give >/dev/null 2>&1
