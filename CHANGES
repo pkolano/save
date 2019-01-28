@@ -28,4 +28,5 @@ CHANGES
     - Fixed inadvertent failovers due to non-atomic state updates
 
 * Save 2.2 (01/28/19)
+    - Added crontab entry in INSTALL that prevents takeover after reboot
     - Fixed immediate retake after --give due to inaccurate remote timestamp
